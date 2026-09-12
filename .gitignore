@@ -1,0 +1,84 @@
+# =============================================================================
+# Purrenade API — backend .gitignore
+# =============================================================================
+
+# --- Environment / secrets ---------------------------------------------------
+.env
+.env.*
+!.env.example
+
+# --- Dependencies ------------------------------------------------------------
+/vendor/
+/node_modules/
+
+# --- Laravel runtime ---------------------------------------------------------
+/storage/*.key
+/storage/pail
+/storage/app/public
+/storage/framework/cache/*
+!/storage/framework/cache/.gitignore
+/storage/framework/sessions/*
+!/storage/framework/sessions/.gitignore
+/storage/framework/testing/*
+!/storage/framework/testing/.gitignore
+/storage/framework/views/*
+!/storage/framework/views/.gitignore
+/storage/logs/*
+!/storage/logs/.gitignore
+/bootstrap/cache/*
+!/bootstrap/cache/.gitignore
+
+# --- Build output ------------------------------------------------------------
+/public/build
+/public/hot
+/public/storage
+
+# --- Test / analysis artifacts ----------------------------------------------
+.phpunit.result.cache
+.phpunit.cache/
+/coverage/
+.phpstan.cache/
+.pest.cache/
+
+# --- Logs --------------------------------------------------------------------
+*.log
+
+# --- Local development -------------------------------------------------------
+/.docker/data/
+docker-compose.override.yml
+auth.json
+Homestead.json
+Homestead.yaml
+
+# --- OS / editor junk --------------------------------------------------------
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# --- Laravel / editor additions from the framework skeleton -----------------
+.env.backup
+.env.production
+/auth.json
+/.phpunit.cache
+_ide_helper.php
+.phpactor.json
+/public/fonts-manifest.dev.json
+
+# --- Additional editor directories ------------------------------------------
+/.vscode
+/.nova
+/.zed
+/.cursor/
+/.codex
+
+# --- Local development certificates -----------------------------------------
+# Certificates and keys live outside the repository (Nginx's cert directory).
+# These patterns exist so a key generated into a working tree by mistake can
+# never be committed.
+*.pem
+*-key.pem
+*.key
+*.crt
+certs/

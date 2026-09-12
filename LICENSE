@@ -1,0 +1,24 @@
+PURRENADE API — LICENSING NOT YET DETERMINED
+============================================
+
+Status: OPEN. No license has been granted.
+
+This repository is expected to be publicly readable. Public source
+availability does NOT imply that any rights are granted. Until an explicit
+licensing decision is recorded and this file is replaced with real license
+terms, ALL RIGHTS ARE RESERVED.
+
+No permission is granted to copy, modify, distribute, sublicense, or make
+derivative or commercial use of any part of this repository, including but
+not limited to source code, the Purrenade name and brand identity, and any
+media.
+
+Third-party components remain governed by their own licenses.
+
+The layered rights model that must be decided before this file is finalized
+is documented in the frontend repository:
+
+  purrenade/docs/product/licensing-and-rights.md
+
+Private source/reference photographs are never included in any Purrenade
+repository, under any license.

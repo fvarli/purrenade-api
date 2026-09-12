@@ -1,0 +1,215 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Project runtime. Laravel 13 declares php ^8.3, but Symfony 8 dependencies
+  # and PHPUnit 13 (>=8.4.1) make 8.4 the real floor.
+  PHP_VERSION: '8.4'
+
+jobs:
+  app:
+    name: Format, analyse, test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ env.PHP_VERSION }}
+          extensions: pdo_pgsql, pgsql, mbstring, xml, curl, zip, bcmath, intl
+          coverage: none
+
+      # PostgreSQL runs natively on the runner. Docker is deliberately not used
+      # anywhere in this project, including CI: a service container here would
+      # normalise Docker as a project dependency.
+      - name: Start the runner's native PostgreSQL
+        id: pg
+        run: |
+          set -euo pipefail
+          if ! command -v pg_ctlcluster >/dev/null && ! command -v pg_isready >/dev/null; then
+            echo "No PostgreSQL on this runner image; installing the distribution package."
+            sudo apt-get update -qq
+            sudo apt-get install -y --no-install-recommends postgresql postgresql-client
+          fi
+          sudo systemctl start postgresql
+          # The version is DETECTED, never assumed: if the runner image changes,
+          # that surfaces here as visible output instead of a silent behaviour shift.
+          for _ in $(seq 1 30); do pg_isready -h 127.0.0.1 -p 5432 && break; sleep 1; done
+          SERVER_VERSION="$(sudo -u postgres psql -tAc 'show server_version')"
+          echo "PostgreSQL server on this runner: ${SERVER_VERSION}"
+          echo "server_version=${SERVER_VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Create the throwaway test role and database
+        run: |
+          set -euo pipefail
+          sudo -u postgres psql -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE ROLE purrenade LOGIN PASSWORD 'ci-only-not-a-secret';
+          CREATE DATABASE purrenade OWNER purrenade;
+          SQL
+
+      - name: Install from the lockfile
+        run: composer install --prefer-dist --no-interaction --no-progress
+
+      - name: Prepare the environment
+        run: |
+          cp .env.example .env
+          php artisan key:generate
+        env:
+          DB_PASSWORD: ci-only-not-a-secret
+
+      - name: Formatting
+        run: vendor/bin/pint --test
+
+      - name: Static analysis
+        run: vendor/bin/phpstan analyse --no-progress
+
+      - name: Migrations
+        run: php artisan migrate --force
+        env:
+          DB_PASSWORD: ci-only-not-a-secret
+
+      - name: Tests
+        run: vendor/bin/pest
+        env:
+          DB_PASSWORD: ci-only-not-a-secret
+
+      - name: Record the PostgreSQL version gap
+        run: |
+          echo "CI PostgreSQL : ${{ steps.pg.outputs.server_version }}"
+          echo "Project target: 18.x"
+          echo "Known, intentional gap. A dedicated PG18 compatibility gate lands"
+          echo "before database-sensitive product work at M9."
+
+  contract:
+    name: OpenAPI contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate the OpenAPI document
+        run: npx --yes @redocly/cli@latest lint docs/api/openapi.draft.yaml
+
+      - name: Every route must exist in the contract
+        run: |
+          set -euo pipefail
+          # An undocumented endpoint is invisible to the only mechanism keeping
+          # the two repositories in step.
+          python3 - <<'EOF'
+          import re, sys
+          # Every file that can declare a route. routes/root.php holds the one
+          # endpoint above the /api prefix; missing it here would let the web
+          # root drift out of the contract unnoticed.
+          routes = ''.join(
+              open(f, encoding='utf-8').read()
+              for f in ('routes/api.php', 'routes/root.php')
+          )
+          spec = open('docs/api/openapi.draft.yaml', encoding='utf-8').read()
+          declared = set(re.findall(r"Route::(?:get|post|put|patch|delete)\(\s*'([^']+)'", routes))
+          missing = [r for r in declared if re.search(r'^\s{2}' + re.escape(r) + r':\s*$', spec, re.M) is None]
+          if missing:
+              print('ERROR: routes not present in openapi.draft.yaml:', missing)
+              sys.exit(1)
+          print(f'all {len(declared)} declared route(s) present in the contract')
+          EOF
+
+  docs:
+    name: Documentation checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify documentation structure
+        run: |
+          set -euo pipefail
+          for d in docs/architecture docs/api docs/security docs/testing docs/decisions; do
+            test -d "$d" || { echo "missing required directory: $d"; exit 1; }
+          done
+          test -f docs/README.md
+          test -f docs/api/openapi.draft.yaml
+          test -f docs/api/api-conventions.md
+          test -f docs/security/threat-model.md
+          echo "documentation structure OK"
+
+      - name: Verify no environment files other than .env.example are tracked
+        run: |
+          set -euo pipefail
+          offenders=$(git ls-files \
+            | grep -E '(^|/)\.env($|\.)' \
+            | grep -Ev '(^|/)\.env\.example$' || true)
+          if [ -n "$offenders" ]; then
+            echo "ERROR: environment files are tracked:"
+            echo "$offenders"
+            exit 1
+          fi
+          echo "no environment files tracked"
+
+      - name: Verify no dependency or build output is tracked
+        run: |
+          set -euo pipefail
+          if git ls-files | grep -Eq '^(vendor|node_modules|public/build)/'; then
+            echo "ERROR: dependency or build output is tracked by git"
+            exit 1
+          fi
+          echo "no dependency or build output tracked"
+
+      - name: Check open questions carry reference ids
+        run: |
+          set -euo pipefail
+          python3 - <<'EOF'
+          import os, re, sys
+          # A reference is a register id, an ADR, or a conflict-register number.
+          ONE = (r'(?:(?:API|AUTH|2FA|ANTI|CACHE|DM|BA|OB|QJ|RL|GR|AD|PR|CH|SEC'
+                 r'|SI|AU|LB|LO|LR|OPS|ARCH|PWA|RNG|DO|SP|TU|CR|AC|AA|ASSET)-\d+'
+                 r'|ADR-\d{4}|#\d+)')
+          REF = ONE + r'(?:\s*/\s*' + ONE + r')*'
+          bad = []
+          for dp, _, fn in os.walk('docs'):
+              for f in fn:
+                  if not f.endswith('.md'):
+                      continue
+                  path = os.path.join(dp, f)
+                  lines = open(path, encoding='utf-8').read().split('\n')
+                  inside = False
+                  for i, line in enumerate(lines, 1):
+                      if line.startswith('#'):
+                          inside = 'Open question' in line
+                          continue
+                      if not inside or not line.startswith('|'):
+                          continue
+                      cell = line.split('|')[1].strip().strip('*')
+                      if cell in ('Ref', '---') or set(cell) <= {'-', ' '}:
+                          continue
+                      if not re.fullmatch(REF, cell):
+                          bad.append(f'{path}:{i}: "{cell}"')
+          if bad:
+              print('ERROR: open-question rows without a reference id:')
+              for b in bad:
+                  print('  ', b)
+              sys.exit(1)
+          print('all open questions carry reference ids')
+          EOF
+
+      - name: Verify no Docker files were introduced
+        run: |
+          set -euo pipefail
+          # Docker is deliberately not part of this project's workflow.
+          if git ls-files | grep -Eiq '(^|/)(Dockerfile|compose\.ya?ml|docker-compose\.ya?ml)$'; then
+            echo "ERROR: Docker files are tracked; this project does not use Docker."
+            git ls-files | grep -Ei '(^|/)(Dockerfile|compose\.ya?ml|docker-compose\.ya?ml)$'
+            exit 1
+          fi
+          echo "no Docker files tracked"

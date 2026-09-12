@@ -1,0 +1,1329 @@
+openapi: 3.1.0
+
+info:
+  title: Purrenade API
+  version: 0.1.0-draft
+  summary: Contract shape for the Purrenade backend.
+  description: |
+    **M0 DRAFT — contract shape only. No implementation exists.**
+
+    This document defines the intended shape of the Purrenade REST API so the
+    frontend can be designed against it before the backend is bootstrapped. It is
+    not generated from code, and no controller, migration, or endpoint exists yet.
+
+    Authoritative product behavior lives in the frontend repository's
+    Product/Game Specification (`purrenade/docs/product/`). Conventions for
+    versioning, errors, pagination, idempotency and rate limiting are in
+    `docs/api/api-conventions.md`.
+
+    **Decided in M0.5:**
+
+    - **ADR-0005 — Accepted.** A Nuxt BFF with server-managed session cookies for the
+      browser, over a **token-capable** API. No endpoint may assume a browser, a cookie,
+      or a same-site context: a future native client authenticates directly against this
+      API with a bearer flow, bypassing the BFF.
+    - **Achievement progression authority — APPROVED.** Client-reported summary counters
+      alone are insufficient. Telemetry fields in `FinishRunRequest` are **inputs to
+      server-side derivation, never authoritative totals**. Each achievement carries a
+      **Verification Source** and a **Progress Persistence**; storing a cumulative total
+      never reclassifies where its evidence came from.
+    - **Audio Option C — APPROVED.** Settings owns music and SFX volume sliders; Pause
+      exposes quick mute/unmute. Mute is stored independently of volume.
+    - **Character unlock semantics — APPROVED.** Sero counts *actual* Loli activations,
+      not thresholds earned.
+    - **Leaderboard core rules — APPROVED**, including the Europe/Istanbul weekly boundary.
+    - **Loli Bonus queueing is run-scoped.** There is deliberately **no owed/queued Loli
+      field** in `Progression`.
+
+    **Still open:**
+
+    - **ADR-0006** — run validation / anti-cheat boundary. Whether a run is server-started,
+      whether the seed is server-issued, and *what form* validated telemetry retention
+      takes are open — but that *some* retention exists is now required.
+
+    Decision status is marked inline as APPROVED, PROPOSED, or OPEN.
+  contact:
+    name: Purrenade
+    url: https://example.invalid/purrenade
+  license:
+    name: Not yet determined — all rights reserved
+    url: https://example.invalid/purrenade/license
+
+servers:
+  - url: https://api.purrenade.invalid/api/v1
+    description: Placeholder. Real environments are defined at M1.
+
+tags:
+  - name: Auth
+    description: Registration, login, email verification, password reset, 2FA, sessions.
+  - name: Game Runs
+    description: Run lifecycle and server-authoritative results.
+  - name: Progression
+    description: Paw counters, tutorial state, and derived progress.
+  - name: Leaderboards
+    description: Weekly and all-time rankings.
+  - name: Achievements
+    description: Achievement catalogue and player progress.
+  - name: Characters
+    description: Character catalogue and unlock state.
+  - name: Profile
+    description: Player profile and settings.
+  - name: Admin
+    description: Administrative surface. Capabilities are OPEN (SI-1).
+  - name: Operational
+    description: Infrastructure endpoints. Not product surface.
+
+# Either scheme satisfies an authenticated endpoint. The browser always uses
+# sessionAuth via the Nuxt BFF; nativeBearerAuth is reserved for a future native
+# client and is not implemented in v1. Declaring both records the ADR-0005
+# obligation that no endpoint may assume a browser, a cookie, or a same-site context.
+security:
+  - sessionAuth: []
+  - nativeBearerAuth: []
+
+paths:
+  /:
+    # The web root sits ABOVE this document's server base, which ends in
+    # /api/v1. An OpenAPI 3.1 path-item-level `servers` entry re-bases just this
+    # path, so the one endpoint outside the versioned prefix can be described
+    # without weakening the base URL for the other twenty-something.
+    servers:
+      - url: https://api.purrenade.invalid
+        description: Placeholder origin. Real environments are defined at M1.
+    get:
+      tags: [Operational]
+      operationId: root
+      summary: API-only signpost
+      description: |
+        **IMPLEMENTED (M1).** The web root of an API-only service.
+
+        There is no browser-facing surface: no HTML, no Blade, no login page. Without this
+        route the root returns a bare framework 404, which tells an operator nothing and
+        reads like a misconfigured deployment.
+
+        `success` is `false` — the caller asked for something this service does not serve —
+        but the status is **200**, because the route is not an error: it answers exactly as
+        designed. 404-ing a deliberate signpost only hides it from monitoring.
+
+        Every field is a constant or a safe descriptor. No versions, no hostnames, no
+        filesystem paths, no configuration, no stack data. See
+        `docs/architecture/observability.md` §7.
+
+        This is an operational endpoint, not product surface. It is documented here because
+        every endpoint that exists must exist in this contract.
+      security: []
+      responses:
+        '200':
+          description: The service identifies itself and points at the API.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    enum: [false]
+                    description: Always false — the web root serves no resource.
+                  message:
+                    type: string
+                    description: Fixed human-readable explanation.
+                  service:
+                    type: string
+                    description: Service name, e.g. "Purrenade API".
+                  environment:
+                    type: string
+                    description: Deployment tier name only, e.g. "local", "production".
+                  api_base:
+                    type: string
+                    description: Path prefix every product endpoint lives under.
+                  health:
+                    type: string
+                    description: Path of the readiness probe.
+                  documentation:
+                    type: [string, 'null']
+                    format: uri
+                    description: |
+                      Public documentation URL, or `null` while none is published. It is
+                      deliberately null rather than a plausible link that would 404.
+                required: [success, message, service, environment, api_base, health, documentation]
+              example:
+                success: false
+                message: This is an API-only application. No web access allowed.
+                service: Purrenade API
+                environment: production
+                api_base: /api/v1
+                health: /api/v1/health
+                documentation: null
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /health:
+    get:
+      tags: [Operational]
+      operationId: health
+      summary: Readiness probe
+      description: |
+        **IMPLEMENTED (M1).** Reports whether the service can actually do its job.
+
+        **This is readiness, not liveness.** Every meaningful response this API produces
+        comes out of PostgreSQL, so a process that cannot reach PostgreSQL is not ready to
+        serve, and reporting `200` in that state is worse than reporting nothing. When the
+        database is unreachable the endpoint answers **503**, which is what lets a load
+        balancer take the instance out of rotation instead of paging a human.
+
+        **Scope is exactly one dependency.** Cache, queue, mail and Redis are not adopted by
+        this project; probing things the service does not use turns a health check into an
+        observability system. See `docs/architecture/observability.md` §7.
+
+        **No version field.** There is no source of truth for one — `composer.json` declares
+        no version and the project has no releases. The only number available would be the
+        framework's, which is not this service's version and which §7 forbids disclosing to
+        unauthenticated callers. It will be added, here and in the response, when releases
+        begin.
+
+        Nothing in the payload is privileged: no hostnames, no filesystem paths, no
+        credentials, no SQL, no stack traces. A failing dependency is logged in full
+        server-side and reported here as nothing more than `"error"`.
+
+        This is an operational endpoint, not product surface. It is documented here because
+        every endpoint that exists must exist in this contract.
+      security: []
+      responses:
+        '200':
+          description: Ready. The process is up and the database is reachable.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HealthReport' }
+              example:
+                success: true
+                status: ok
+                service: Purrenade API
+                environment: production
+                timestamp: '2026-01-15T09:24:11+00:00'
+                checks:
+                  application: ok
+                  database: ok
+        '503':
+          description: |
+            Not ready. The process is serving, but a dependency it needs is unreachable.
+            The reason is in the service log, never in this response.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HealthReport' }
+              example:
+                success: false
+                status: degraded
+                service: Purrenade API
+                environment: production
+                timestamp: '2026-01-15T09:24:11+00:00'
+                checks:
+                  application: ok
+                  database: error
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /auth/register:
+    post:
+      tags: [Auth]
+      operationId: register
+      summary: Register a new player
+      description: |
+        APPROVED. Creates an unverified account and dispatches a 6-digit email
+        verification code. Password policy is OPEN (SEC-1).
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RegisterRequest' }
+      responses:
+        '201':
+          description: Account created; a verification code has been dispatched.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthenticatedPlayer' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /auth/login:
+    post:
+      tags: [Auth]
+      operationId: login
+      summary: Authenticate with email and password
+      description: |
+        APPROVED. On success, returns either an authenticated player or a 2FA
+        challenge requirement. The credential mechanism is OPEN (ADR-0005).
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginRequest' }
+      responses:
+        '200':
+          description: Authenticated, or a two-factor challenge is required.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LoginResult' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /auth/logout:
+    post:
+      tags: [Auth]
+      operationId: logout
+      summary: End the current session
+      description: APPROVED. Revokes the credential used by this request.
+      responses:
+        '204':
+          description: Session ended.
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+
+  /auth/email/verify:
+    post:
+      tags: [Auth]
+      operationId: verifyEmail
+      summary: Verify the email address with a 6-digit code
+      description: |
+        APPROVED. Verification uses a 6-digit code, not a magic link
+        (Claude Design v0.3 board 04). Code TTL and attempt limits are OPEN.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/EmailVerifyRequest' }
+      responses:
+        '200':
+          description: Email verified.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthenticatedPlayer' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /auth/email/verify/resend:
+    post:
+      tags: [Auth]
+      operationId: resendEmailVerification
+      summary: Resend the email verification code
+      description: |
+        APPROVED. Subject to a resend cooldown; v0.3 board 04 displays 0:42.
+        The exact cooldown is OPEN (SEC-2).
+      responses:
+        '202':
+          description: A new code has been dispatched, or the cooldown is still active.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ResendResult' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /auth/password/forgot:
+    post:
+      tags: [Auth]
+      operationId: forgotPassword
+      summary: Request a password reset link
+      description: |
+        APPROVED. Password reset uses an emailed link, unlike email verification
+        (v0.3 board 06). The response is identical whether or not the address
+        exists, to avoid account enumeration.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ForgotPasswordRequest' }
+      responses:
+        '202':
+          description: If the address exists, a reset link has been dispatched.
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /auth/password/reset:
+    post:
+      tags: [Auth]
+      operationId: resetPassword
+      summary: Set a new password using a reset token
+      description: APPROVED. The token is single-use and time-limited.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ResetPasswordRequest' }
+      responses:
+        '204':
+          description: Password updated.
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /auth/2fa/challenge:
+    post:
+      tags: [Auth]
+      operationId: submitTwoFactorChallenge
+      summary: Complete a two-factor challenge
+      description: |
+        APPROVED. Accepts either a TOTP code or a single-use recovery code
+        (v0.3 board 05). Whether the challenge occurs at login or as step-up is
+        OPEN (ADR-0005 question 4).
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TwoFactorChallengeRequest' }
+      responses:
+        '200':
+          description: Challenge passed.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthenticatedPlayer' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /auth/2fa/enable:
+    post:
+      tags: [Auth]
+      operationId: beginTwoFactorEnrolment
+      summary: Begin TOTP enrolment
+      description: APPROVED. Returns provisioning data for an authenticator app.
+      responses:
+        '200':
+          description: Enrolment started; awaiting confirmation.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TwoFactorEnrolment' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+
+  /auth/2fa/confirm:
+    post:
+      tags: [Auth]
+      operationId: confirmTwoFactorEnrolment
+      summary: Confirm TOTP enrolment and issue recovery codes
+      description: |
+        APPROVED. Recovery codes are returned exactly once and are stored hashed.
+        Count and regeneration policy are OPEN (ADR-0005 question 6).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TwoFactorConfirmRequest' }
+      responses:
+        '200':
+          description: Two-factor authentication enabled.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RecoveryCodes' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+
+  /auth/2fa/disable:
+    post:
+      tags: [Auth]
+      operationId: disableTwoFactor
+      summary: Disable two-factor authentication
+      description: |
+        APPROVED. Forbidden for the admin role: 2FA is mandatory for admins and
+        this endpoint returns 403 for them.
+      responses:
+        '204':
+          description: Two-factor authentication disabled.
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /auth/sessions:
+    get:
+      tags: [Auth]
+      operationId: listSessions
+      summary: List active sessions and devices
+      description: |
+        APPROVED (v0.3 board 20). Shows device, approximate location and relative
+        last-seen time, and marks the current session.
+      responses:
+        '200':
+          description: Active sessions.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    description: Active sessions for the authenticated player.
+                    items: { $ref: '#/components/schemas/Session' }
+                required: [data]
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+    delete:
+      tags: [Auth]
+      operationId: revokeAllSessions
+      summary: Sign out of all devices
+      description: APPROVED. Revocation takes effect immediately.
+      responses:
+        '204':
+          description: All sessions revoked.
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+
+  /auth/sessions/{sessionId}:
+    delete:
+      tags: [Auth]
+      operationId: revokeSession
+      summary: Revoke a single session
+      description: APPROVED. Revocation takes effect immediately.
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          description: Identifier of the session to revoke.
+          schema: { type: string }
+      responses:
+        '204':
+          description: Session revoked.
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /game-runs:
+    post:
+      tags: [Game Runs]
+      operationId: startGameRun
+      summary: Start a run
+      description: |
+        **OPEN (ADR-0006).** Whether runs are started server-side at all depends
+        on the validation model and on whether runs are playable offline (PWA-1).
+
+        If adopted, this issues a run token, a server-controlled RNG seed, and a
+        server-recorded start time, which bounds run duration and spawn sequence
+        against server-observed reality.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/StartRunRequest' }
+      responses:
+        '201':
+          description: Run started.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StartedRun' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /game-runs/{runId}/finish:
+    post:
+      tags: [Game Runs]
+      operationId: finishGameRun
+      summary: Submit a run result
+      description: |
+        APPROVED in principle; validation model OPEN (ADR-0006).
+
+        **Idempotent.** Requires an `Idempotency-Key`; a repeat with the same key
+        returns the original response and performs no further work.
+
+        The client **proposes**; the server **decides**. The response carries the
+        authoritative score and the resulting progression, and the client
+        displays those values rather than its own.
+
+        Accepted runs update the run record, the paw ledger, achievement progress
+        and character unlocks **in one transaction**.
+      parameters:
+        - name: runId
+          in: path
+          required: true
+          description: The run being finished.
+          schema: { type: string }
+        - name: Idempotency-Key
+          in: header
+          required: true
+          description: Client-generated key, unique per player per endpoint.
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/FinishRunRequest' }
+      responses:
+        '200':
+          description: Run result recorded. The returned values are authoritative.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RunResult' }
+        '409':
+          description: The same idempotency key was used with a different request body.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /progression:
+    get:
+      tags: [Progression]
+      operationId: getProgression
+      summary: Get the player's progression
+      description: |
+        APPROVED. Returns the three distinct paw counters and derived progress.
+        There is no generic `paws` field.
+      responses:
+        '200':
+          description: Current progression.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Progression' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+
+  /progression/tutorial:
+    post:
+      tags: [Progression]
+      operationId: completeTutorial
+      summary: Record tutorial completion
+      description: |
+        APPROVED. Completion is persisted to the player profile so it survives
+        reinstall. Replaying the tutorial from Settings does not clear or
+        re-stamp it. The tutorial affects no score, leaderboard, or progression
+        data.
+      responses:
+        '200':
+          description: Tutorial completion recorded.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TutorialState' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+
+  /leaderboards:
+    get:
+      tags: [Leaderboards]
+      operationId: getLeaderboard
+      summary: Get a leaderboard page
+      description: |
+        APPROVED (v0.3 board 15). Two windows: weekly and all-time. Ranks by best
+        single-run score. The response always includes the requesting player's own
+        row with its true rank, even when outside the page.
+
+        **Weekly boundary — APPROVED:** Monday 00:00 Europe/Istanbul, attributed by
+        server-recorded run start. Türkiye has been UTC+3 year-round since 2016, so there is
+        no DST-ambiguous or duplicated hour at rollover.
+
+        Ordering is a **total order** — score, then earlier achievement, then shorter
+        duration, then a stable id — so cursor pagination cannot duplicate or skip rows.
+
+        Banned players' entries are hidden but retained; deleted players must not appear
+        under their former identity; opted-out players are excluded from public pages but
+        still see their own rank.
+      parameters:
+        - name: window
+          in: query
+          required: true
+          description: Which ranking window to read.
+          schema:
+            type: string
+            enum: [weekly, all_time]
+        - name: cursor
+          in: query
+          required: false
+          description: Opaque cursor from a previous response.
+          schema: { type: string }
+        - name: limit
+          in: query
+          required: false
+          description: Page size.
+          schema: { type: integer, minimum: 1, maximum: 100 }
+      responses:
+        '200':
+          description: A page of the ranking, plus the player's own row.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LeaderboardPage' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+
+  /achievements:
+    get:
+      tags: [Achievements]
+      operationId: listAchievements
+      summary: List achievements and the player's progress
+      description: |
+        APPROVED in shape (v0.3 board 16): a catalogue of 16 with progress,
+        unlocked and locked states, and hidden rewards.
+
+        **OPEN:** ten achievements are undefined (AU-1), and two of the six
+        defined ones depend on Çay and Trileçe, which are not v1 mechanics (AU-2).
+      responses:
+        '200':
+          description: Achievement catalogue with player progress.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    description: All achievements with this player's progress.
+                    items: { $ref: '#/components/schemas/Achievement' }
+                  unlocked_count: { type: integer, description: Number unlocked. }
+                  total_count: { type: integer, description: Catalogue size. }
+                required: [data, unlocked_count, total_count]
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+
+  /characters:
+    get:
+      tags: [Characters]
+      operationId: listCharacters
+      summary: List characters and unlock state
+      description: |
+        APPROVED in shape (v0.3 board 09). A character is selectable only when
+        **both** gates are satisfied: the unlock criterion is met and approved
+        artwork exists.
+
+        **OPEN:** unlock criteria semantics (AU-4), and whether non-Ayşenur
+        characters have their own special power (AU-5).
+      responses:
+        '200':
+          description: Character catalogue with unlock state.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    description: All characters with this player's unlock state.
+                    items: { $ref: '#/components/schemas/Character' }
+                required: [data]
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+
+  /profile:
+    get:
+      tags: [Profile]
+      operationId: getProfile
+      summary: Get the player's profile
+      description: APPROVED (v0.3 board 17).
+      responses:
+        '200':
+          description: The player's profile.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Profile' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+    patch:
+      tags: [Profile]
+      operationId: updateProfile
+      summary: Update profile and settings
+      description: |
+        APPROVED. Covers locale, favourite character, and audio/motion settings.
+
+        **OPEN (#10):** whether audio settings are on/off toggles or volume
+        levels — v0.3 contradicts itself between the pause and settings screens.
+        The schema below models toggles provisionally and must be revisited.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateProfileRequest' }
+      responses:
+        '200':
+          description: Updated profile.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Profile' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+
+  /profile/delete:
+    post:
+      tags: [Profile]
+      operationId: requestAccountDeletion
+      summary: Request account deletion
+      description: |
+        **OPEN (SEC-3).** Required by KVKK/GDPR, and by both major app stores for
+        any app that supports account creation. What deletion does to recorded
+        runs and public leaderboard entries is undecided (LB-5, DM-4).
+      responses:
+        '202':
+          description: Deletion requested.
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+
+  /admin/players:
+    get:
+      tags: [Admin]
+      operationId: adminListPlayers
+      summary: Look up players
+      description: |
+        **OPEN (SI-1).** Admin capabilities are undefined in every reference.
+        This path is a placeholder so the admin surface is visible in the
+        contract; it is not implemented until specified.
+
+        Requires the admin role **and** satisfied 2FA. Every admin action is
+        audited.
+      parameters:
+        - name: query
+          in: query
+          required: false
+          description: Free-text lookup.
+          schema: { type: string }
+      responses:
+        '200':
+          description: Matching players.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    description: Matching players.
+                    items: { $ref: '#/components/schemas/Profile' }
+                required: [data]
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+components:
+  securitySchemes:
+    sessionAuth:
+      type: apiKey
+      in: cookie
+      name: purrenade_session
+      description: |
+        **APPROVED (ADR-0005).** Browser traffic reaches this API through the **Nuxt BFF**,
+        which holds the server-side session and attaches the upstream credential. The
+        browser itself carries only an `HttpOnly`, `Secure`, `SameSite=Lax` session cookie
+        set by the BFF, and **never** a bearer token in `localStorage` or `sessionStorage`.
+
+        CSRF is enforced **at the BFF** for browser traffic; this API is not reached by
+        ambient browser authority.
+
+        Laravel remains the authentication authority — the BFF is a client of it and makes
+        no authorization decision.
+    nativeBearerAuth:
+      type: http
+      scheme: bearer
+      description: |
+        **RESERVED — not implemented in v1.**
+
+        A future Android/iOS client authenticates **directly against this API** with a
+        bearer credential, bypassing the BFF, because a native shell cannot rely on
+        same-site cookies. The scheme is declared so the contract records the obligation
+        that **no endpoint may assume a browser, a cookie, or a same-site context**.
+
+        Tokens live in platform secure storage. No browser client ever uses this scheme.
+
+  responses:
+    Unauthenticated:
+      description: Not authenticated, or the credential has expired.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    Forbidden:
+      description: Authenticated but not permitted, including when admin 2FA is unsatisfied.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    NotFound:
+      description: Not found, or not visible to this caller.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    ValidationFailed:
+      description: The request failed validation.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    RateLimited:
+      description: Too many requests. Honour the retry signal; do not retry in a loop.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  schemas:
+    HealthReport:
+      type: object
+      description: |
+        The readiness report. Identical in shape whether the service is ready or not — a
+        monitor should branch on `status` and the HTTP code, never on which fields exist.
+
+        There is deliberately no `version` field; see the endpoint description.
+      properties:
+        success:
+          type: boolean
+          description: True only when every check passed.
+        status:
+          type: string
+          enum: [ok, degraded]
+          description: '`ok` when every check passed, `degraded` when any did not.'
+        service:
+          type: string
+          description: Service name, e.g. "Purrenade API".
+        environment:
+          type: string
+          description: Deployment tier name only, e.g. "local", "production".
+        timestamp:
+          type: string
+          format: date-time
+          description: ISO 8601 with a UTC offset, e.g. `2026-01-15T09:24:11+00:00`.
+        checks:
+          type: object
+          description: |
+            One entry per dependency actually relied upon. A failing check reports `error`
+            and nothing else: the reason is logged server-side, because a driver message
+            carries the host, port, database name and role.
+          properties:
+            application:
+              type: string
+              enum: [ok]
+              description: |
+                Always `ok` when this response is produced — it could not have been produced
+                otherwise. Present so the report is readable without knowing that.
+            database:
+              type: string
+              enum: [ok, error]
+              description: Whether the default PostgreSQL connection answered.
+          required: [application, database]
+      required: [success, status, service, environment, timestamp, checks]
+
+    ErrorResponse:
+      type: object
+      description: The single error envelope used by every error response.
+      properties:
+        error:
+          type: object
+          description: Error detail.
+          properties:
+            code:
+              type: string
+              description: Stable, machine-readable, never localized. Clients branch on this.
+            message:
+              type: string
+              description: Human-readable and localized. For display only, never for logic.
+            correlation_id:
+              type: string
+              description: Always present; traceable in server logs.
+            details:
+              type: object
+              description: Field-level errors, each carrying its own stable code.
+              additionalProperties: true
+          required: [code, message, correlation_id]
+      required: [error]
+
+    RegisterRequest:
+      type: object
+      description: Registration payload. Password policy is OPEN (SEC-1).
+      properties:
+        username: { type: string, description: Public display name. Rules OPEN (LB-3). }
+        email: { type: string, format: email, description: Login identity. }
+        password: { type: string, description: Plaintext over TLS; hashed at rest. }
+        locale: { $ref: '#/components/schemas/Locale' }
+      required: [username, email, password]
+
+    LoginRequest:
+      type: object
+      description: Email and password login.
+      properties:
+        email: { type: string, format: email, description: Registered address. }
+        password: { type: string, description: Plaintext over TLS. }
+      required: [email, password]
+
+    LoginResult:
+      type: object
+      description: Either an authenticated player, or a required two-factor challenge.
+      properties:
+        status:
+          type: string
+          description: Whether authentication completed or a challenge is required.
+          enum: [authenticated, two_factor_required]
+        player:
+          oneOf:
+            - $ref: '#/components/schemas/Player'
+            - type: 'null'
+          description: Present when authentication completed.
+        challenge_token:
+          oneOf:
+            - type: string
+            - type: 'null'
+          description: Short-lived token identifying the pending two-factor challenge.
+      required: [status]
+
+    AuthenticatedPlayer:
+      type: object
+      description: An authenticated player and their current state.
+      properties:
+        player: { $ref: '#/components/schemas/Player' }
+      required: [player]
+
+    Player:
+      type: object
+      description: Identity and account state.
+      properties:
+        id: { type: string, description: Stable identifier. }
+        username: { type: string, description: Public display name. }
+        email_verified: { type: boolean, description: Whether the address is verified. }
+        two_factor_enabled: { type: boolean, description: Whether TOTP is active. }
+        role: { type: string, enum: [player, admin], description: Authorization role. }
+        locale: { $ref: '#/components/schemas/Locale' }
+        created_at: { type: string, format: date-time, description: Account creation time. }
+      required: [id, username, email_verified, two_factor_enabled, role, locale, created_at]
+
+    Locale:
+      type: string
+      description: Player-facing language. Turkish is the source locale.
+      enum: [tr, en, es]
+
+    EmailVerifyRequest:
+      type: object
+      description: Six-digit email verification code.
+      properties:
+        code: { type: string, description: The 6-digit code from the email. }
+      required: [code]
+
+    ResendResult:
+      type: object
+      description: Resend outcome, including the remaining cooldown.
+      properties:
+        cooldown_remaining_ms:
+          type: integer
+          description: Milliseconds until another resend is permitted.
+      required: [cooldown_remaining_ms]
+
+    ForgotPasswordRequest:
+      type: object
+      description: Request a reset link. The response never reveals whether the address exists.
+      properties:
+        email: { type: string, format: email, description: Address to send the link to. }
+      required: [email]
+
+    ResetPasswordRequest:
+      type: object
+      description: Complete a password reset with a single-use token.
+      properties:
+        token: { type: string, description: Token from the emailed link. }
+        password: { type: string, description: The new password. }
+      required: [token, password]
+
+    TwoFactorChallengeRequest:
+      type: object
+      description: Complete a two-factor challenge with a TOTP or recovery code.
+      properties:
+        challenge_token: { type: string, description: Token issued by the login step. }
+        code: { type: string, description: A 6-digit TOTP code or a single-use recovery code. }
+      required: [challenge_token, code]
+
+    TwoFactorEnrolment:
+      type: object
+      description: Provisioning data for an authenticator app.
+      properties:
+        secret: { type: string, description: 'Shown once, during enrolment only.' }
+        otpauth_uri: { type: string, description: Standard provisioning URI for QR display. }
+      required: [secret, otpauth_uri]
+
+    TwoFactorConfirmRequest:
+      type: object
+      description: Confirm enrolment by proving possession of the secret.
+      properties:
+        code: { type: string, description: A current 6-digit TOTP code. }
+      required: [code]
+
+    RecoveryCodes:
+      type: object
+      description: Recovery codes, returned exactly once and stored hashed thereafter.
+      properties:
+        recovery_codes:
+          type: array
+          description: Single-use backup codes.
+          items: { type: string }
+      required: [recovery_codes]
+
+    Session:
+      type: object
+      description: An active session or device.
+      properties:
+        id: { type: string, description: Session identifier. }
+        device_label: { type: string, description: Human-readable device description. }
+        approximate_location: { type: string, description: Coarse location. Derivation is OPEN. }
+        last_seen_at: { type: string, format: date-time, description: Last activity. }
+        is_current: { type: boolean, description: Whether this is the requesting session. }
+      required: [id, device_label, last_seen_at, is_current]
+
+    StartRunRequest:
+      type: object
+      description: Begin a run. Whether runs are server-started is OPEN (ADR-0006).
+      properties:
+        character_id: { type: string, description: Character the player selected. }
+      required: [character_id]
+
+    StartedRun:
+      type: object
+      description: |
+        A server-started run. The seed is server-issued if that model is adopted
+        (RNG-1), making the spawn sequence known to the server.
+      properties:
+        run_id: { type: string, description: Identifier for the run. }
+        run_token: { type: string, description: Presented when finishing the run. }
+        seed: { type: string, description: RNG seed. Presence depends on ADR-0006. }
+        started_at: { type: string, format: date-time, description: Server-recorded start time. }
+      required: [run_id, started_at]
+
+    FinishRunRequest:
+      type: object
+      description: |
+        The client's submission at the end of a run.
+
+        **Everything the client sends is untrusted.** It is namespaced under `telemetry` and
+        every field is prefixed `reported_`, so the boundary is visible in the schema itself
+        rather than only in prose. The server MAY ignore these values entirely.
+
+        The authoritative numbers are **not in this request**. They are computed server-side
+        and returned in `RunResult.derived_facts`, where a client cannot supply them at all.
+
+        Whether telemetry arrives as the summary counts below or as per-event records is OPEN
+        (ANTI-5); retention is explicitly permitted to be minimal — validate at acceptance and
+        keep only compact derived run facts. Retained per-event data is behavioural personal
+        data, see `docs/security/data-protection.md` §2A.
+      properties:
+        run_token: { type: string, description: 'Token from the start call, if that model is adopted.' }
+        telemetry: { $ref: '#/components/schemas/RunTelemetry' }
+      required: [telemetry]
+
+    RunTelemetry:
+      type: object
+      description: |
+        **UNTRUSTED client-reported hints. Never authoritative.**
+
+        Per the APPROVED achievement progression authority rule, client-reported summary
+        counters alone are insufficient for authoritative progression. These values are
+        **inputs to server-side derivation**: the server validates the run and derives score,
+        paw totals, run facts and achievement progress itself. A value here that the server
+        cannot corroborate is discarded, not adopted.
+      properties:
+        reported_duration_ms: { type: integer, minimum: 0, description: 'Client-measured run duration. Superseded by server-recorded timing where available.' }
+        reported_score: { type: integer, minimum: 0, description: 'Client-computed score. Never trusted; the server decides.' }
+        reported_run_paws: { type: integer, minimum: 0, description: 'Paws the client believes it collected. Never trusted; derived server-side.' }
+        reported_slayyy_activations: { type: integer, minimum: 0, description: 'Hint for the SLAYYY achievements. Not an authoritative total.' }
+        reported_loli_activations: { type: integer, minimum: 0, description: 'Hint for ACTUAL Loli Bonus activations — bonuses that ENTERED/ACTIVATED. NOT the count of 200-paw thresholds earned: queued bonuses are run-scoped and can expire unstarted, so the two numbers differ. Never inferable from the paw ledger, and never adopted from this field.' }
+        reported_near_miss_count: { type: integer, minimum: 0, description: 'Hint for near-miss achievements. A near miss awards no score and fires at most once per obstacle.' }
+        reported_lane_blocking_passes: { type: integer, minimum: 0, description: 'LANE_BLOCKING obstacles the client believes were safely passed. Hint for cone_dodger.' }
+        reported_peak_queued_loli_bonuses: { type: integer, minimum: 0, description: 'Run-scoped queue depth, for analysis only. Never persisted as progression and never carried into a future run.' }
+      required: [reported_duration_ms, reported_score, reported_run_paws]
+
+    RunResult:
+      type: object
+      description: |
+        The **authoritative** outcome. A flagged run is recorded and excluded from
+        ranking pending review; the player is told honestly rather than silently
+        ignored.
+      properties:
+        run_id: { type: string, description: Identifier for the run. }
+        status:
+          type: string
+          description: Validation outcome.
+          enum: [accepted, flagged, rejected]
+        score: { type: integer, description: Authoritative score. }
+        is_personal_best: { type: boolean, description: Whether this beat the previous record. }
+        previous_best_score: { type: integer, description: The record before this run. }
+        run_paws: { type: integer, description: Authoritative paws for this run. }
+        derived_facts: { $ref: '#/components/schemas/RunDerivedFacts' }
+        progression: { $ref: '#/components/schemas/Progression' }
+        achievements_unlocked:
+          type: array
+          description: Achievements unlocked by this run.
+          items: { $ref: '#/components/schemas/Achievement' }
+        characters_unlocked:
+          type: array
+          description: Characters unlocked by this run.
+          items: { $ref: '#/components/schemas/Character' }
+      required: [run_id, status, score, run_paws, derived_facts, progression]
+
+    RunDerivedFacts:
+      type: object
+      description: |
+        **AUTHORITATIVE server-derived run facts — the only real numbers.**
+
+        Computed by the server from accepted, validated telemetry. A client cannot supply
+        these: they exist only in the response. Every `DERIVED_TELEMETRY` achievement reads
+        from here, never from `RunTelemetry`.
+
+        The flow is: client telemetry/events → server validation → these derived run facts →
+        persistent lifetime aggregates.
+      properties:
+        loli_activations:
+          type: integer
+          minimum: 0
+          description: 'Loli Bonuses that ACTUALLY STARTED this run (ENTERING/ACTIVE transition). Not thresholds earned: a queued bonus that expired unstarted at run end does not count. Feeds lolis_favourite, loli_devotee and Sero''s unlock.'
+        near_miss_count:
+          type: integer
+          minimum: 0
+          description: 'Near misses this run. At most one per obstacle. Awards no score. Feeds close_call and nerves_of_steel.'
+        lane_blocking_passes:
+          type: integer
+          minimum: 0
+          description: 'LANE_BLOCKING obstacles safely passed. A collision neither increments nor resets. Feeds cone_dodger. Named by obstacle CLASS, not artwork: cone is the v1 art for LANE_BLOCKING, and a future variant reuses the class.'
+        slayyy_activations:
+          type: integer
+          minimum: 0
+          description: 'SLAYYY activations this run. Feeds slayyy_master and slayyy_double.'
+      required: [loli_activations, near_miss_count, lane_blocking_passes, slayyy_activations]
+
+    Progression:
+      type: object
+      description: |
+        The three distinct paw concepts, never collapsed into a generic field.
+        Crossing 200 triggers one Loli Bonus per completed threshold, consumes
+        200, and preserves overflow.
+
+        **There is deliberately no queued or owed Loli Bonus field.** The Loli Bonus is a
+        run-scoped gameplay reward, not a bankable meta-progression currency: queueing lives
+        in the client's `RunState` for the duration of a run and ends with it. A threshold
+        consumed during a run is never converted into a future-run entitlement.
+
+        Character-unlock criteria are **APPROVED** (AU-4 resolved): Büşo from `best_score`,
+        Ogito from accepted `run_count` with **no** duration filter, Sero from
+        `lifetime_loli_activations`. The alternative-reading counters `lifetime_score`,
+        `max_loli_bonus_in_single_run` and `accepted_runs_above_min_duration` are **retired**.
+      properties:
+        lifetime_paws: { type: integer, description: Lifetime statistic. Never consumed. }
+        loli_cycle_paws:
+          type: integer
+          minimum: 0
+          maximum: 199
+          description: Persistent progress toward the next Loli Bonus.
+        loli_threshold: { type: integer, description: Always 200. }
+        best_score: { type: integer, description: Best single-run score. }
+        run_count: { type: integer, description: Completed runs. }
+        achievements_unlocked_count: { type: integer, description: Achievements unlocked. }
+        lifetime_loli_activations: { type: integer, description: "Lifetime count of ACTUAL Loli Bonus activations, accumulated from each accepted run's loli_activations. Sero's approved unlock criterion (3). Verification source DERIVED_TELEMETRY, progress persistence PERSISTED_AGGREGATE. Not the count of thresholds earned." }
+        lifetime_near_misses: { type: integer, description: 'Derived from accepted run telemetry. Feeds near-miss achievements. DERIVED_TELEMETRY source, persisted aggregate.' }
+        lifetime_lane_blocking_passes: { type: integer, description: 'Derived from accepted run telemetry. Feeds cone_dodger. DERIVED_TELEMETRY source, persisted aggregate.' }
+        lifetime_slayyy_activations: { type: integer, description: 'Derived from accepted run telemetry. Feeds SLAYYY achievements. DERIVED_TELEMETRY source, persisted aggregate.' }
+        tutorial_completed_at:
+          oneOf:
+            - type: string
+              format: date-time
+            - type: 'null'
+          description: First tutorial completion; null until completed.
+      required: [lifetime_paws, loli_cycle_paws, loli_threshold, best_score, run_count]
+
+    TutorialState:
+      type: object
+      description: Tutorial completion state, persisted to the profile.
+      properties:
+        tutorial_completed_at: { type: string, format: date-time, description: Completion timestamp. }
+      required: [tutorial_completed_at]
+
+    LeaderboardPage:
+      type: object
+      description: A page of the ranking plus the requesting player's own row.
+      properties:
+        window: { type: string, enum: [weekly, all_time], description: Which window this page is from. }
+        data:
+          type: array
+          description: Ranked entries for this page.
+          items: { $ref: '#/components/schemas/LeaderboardEntry' }
+        own_entry: { $ref: '#/components/schemas/LeaderboardEntry' }
+        meta: { $ref: '#/components/schemas/CursorMeta' }
+      required: [window, data, meta]
+
+    LeaderboardEntry:
+      type: object
+      description: One ranked row.
+      properties:
+        rank: { type: integer, description: Position in the ranking. }
+        player_id: { type: string, description: Stable identifier. }
+        username: { type: string, description: Public display name. }
+        score: { type: integer, description: Best single-run score in this window. }
+        achieved_at: { type: string, format: date-time, description: When the score was set. }
+      required: [rank, player_id, username, score]
+
+    CursorMeta:
+      type: object
+      description: Cursor pagination metadata. Cursors are opaque and never constructed by clients.
+      properties:
+        next_cursor:
+          oneOf:
+            - type: string
+            - type: 'null'
+          description: Cursor for the next page, or null.
+        has_more: { type: boolean, description: Whether more pages exist. }
+      required: [has_more]
+
+    Achievement:
+      type: object
+      description: |
+        One achievement with this player's progress.
+
+        Progression is **derived server-side** from accepted, validated telemetry and
+        authoritative persistent data. A client-reported summary counter is never adopted as
+        authoritative progress.
+
+        Two independent classifications are carried, because "stored in the database" is not
+        the same as "not derived from telemetry". A lifetime counter built by incrementing a
+        telemetry-derived run fact has a **telemetry** verification source.
+
+        The catalogue itself is **PROPOSED** (16 entries) and awaits approval as a whole —
+        see `docs/api/endpoints/achievements.md`.
+      properties:
+        key: { type: string, description: 'Stable machine key, independent of localized display text.' }
+        verification_source:
+          type: string
+          description: 'Where the evidence comes from. DERIVED_PERSISTENT uses authoritative stored progression and run records; DERIVED_TELEMETRY is computed server-side from accepted run telemetry. Client summary counters are never authoritative. Nine of the sixteen proposed achievements are DERIVED_PERSISTENT and seven are DERIVED_TELEMETRY.'
+          enum: [DERIVED_PERSISTENT, DERIVED_TELEMETRY]
+        progress_persistence:
+          type: string
+          description: 'How progress is stored after derivation. PERSISTED_AGGREGATE accumulates across runs in an authoritative counter; RUN_FACT is satisfied by a single accepted run. This is independent of verification_source: storing a cumulative total never reclassifies where its evidence came from.'
+          enum: [PERSISTED_AGGREGATE, RUN_FACT]
+        progress: { type: integer, description: Monotonic progress value. }
+        target: { type: integer, description: Value at which it unlocks. }
+        unlocked_at:
+          oneOf:
+            - type: string
+              format: date-time
+            - type: 'null'
+          description: Unlock time, or null if still locked.
+        is_hidden: { type: boolean, description: Whether the reward is hidden until unlocked. }
+      required: [key, progress, target, is_hidden]
+
+    Character:
+      type: object
+      description: |
+        A character and its unlock state. Selectable only when the criterion is
+        met **and** approved artwork exists.
+      properties:
+        key: { type: string, description: Stable catalogue key. }
+        is_unlocked: { type: boolean, description: Whether the player met the criterion. }
+        artwork_available: { type: boolean, description: Whether approved artwork exists. }
+        is_selectable: { type: boolean, description: True only when both gates are satisfied. }
+        unlock_criterion:
+          type: string
+          description: Human-readable criterion. Semantics are OPEN (AU-4).
+      required: [key, is_unlocked, artwork_available, is_selectable]
+
+    Profile:
+      type: object
+      description: Player profile and settings, as shown on v0.3 boards 17 and 18.
+      properties:
+        player: { $ref: '#/components/schemas/Player' }
+        progression: { $ref: '#/components/schemas/Progression' }
+        favourite_character_key: { type: string, description: Selected character. }
+        settings: { $ref: '#/components/schemas/Settings' }
+      required: [player, progression, settings]
+
+    Settings:
+      type: object
+      description: |
+        Player settings.
+
+        **Audio Option C — APPROVED (#10 resolved).** Settings owns music and SFX **volume
+        sliders**; Pause exposes **quick mute/unmute** for each. v0.3 contradicted itself on
+        this, and Option C deliberately deviates from both boards.
+
+        **Mute is stored independently of volume**, so unmuting restores the previous non-zero
+        level. Mute is never represented as `volume = 0`, which would destroy the level the
+        player chose. A muted channel is silent regardless of its stored volume.
+      properties:
+        locale: { $ref: '#/components/schemas/Locale' }
+        music_volume: { type: number, minimum: 0, maximum: 1, description: 'Music volume, set by the Settings slider.' }
+        music_muted: { type: boolean, description: 'Music mute, toggled from Pause. Independent of music_volume.' }
+        effects_volume: { type: number, minimum: 0, maximum: 1, description: 'Sound-effects volume, set by the Settings slider.' }
+        effects_muted: { type: boolean, description: 'Effects mute, toggled from Pause. Independent of effects_volume.' }
+        reduced_motion: { type: boolean, description: Calms animations; also respects the OS preference. }
+      required: [locale, music_volume, music_muted, effects_volume, effects_muted, reduced_motion]
+
+    UpdateProfileRequest:
+      type: object
+      description: Partial update of profile and settings.
+      properties:
+        locale: { $ref: '#/components/schemas/Locale' }
+        favourite_character_key: { type: string, description: Must be a selectable character. }
+        music_volume: { type: number, minimum: 0, maximum: 1, description: 'Music volume.' }
+        music_muted: { type: boolean, description: 'Music mute. Independent of volume; unmuting restores the previous non-zero level.' }
+        effects_volume: { type: number, minimum: 0, maximum: 1, description: 'Sound-effects volume.' }
+        effects_muted: { type: boolean, description: 'Effects mute. Independent of volume.' }
+        reduced_motion: { type: boolean, description: Calms animations. }

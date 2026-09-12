@@ -1,0 +1,23 @@
+# Normalize line endings across platforms.
+* text=auto eol=lf
+
+*.md        diff=markdown
+*.php       diff=php
+*.blade.php diff=html
+
+# Binary assets.
+*.png   binary
+*.jpg   binary
+*.ico   binary
+*.woff2 binary
+
+# Collapse the lockfile in diffs but keep it in the repository.
+composer.lock -diff
+
+# Exclude development-only paths from release archives.
+/.github        export-ignore
+/tests          export-ignore
+/docs           export-ignore
+.editorconfig   export-ignore
+.gitattributes  export-ignore
+.gitignore      export-ignore

@@ -1,0 +1,42 @@
+# Purrenade API — local development server as a systemd USER service.
+#
+# A user unit, never a system unit: it runs as the developer, needs no root, and
+# lives and dies with the desktop session. Nothing here requires sudo.
+#
+# This file is a TEMPLATE. The @PLACEHOLDERS@ carry no machine-specific paths,
+# so it stays portable for any developer. `bin/install-service` substitutes them
+# and writes the result to ~/.config/systemd/user/ — where paths under $HOME are
+# expressed with systemd's %h specifier rather than a literal home directory.
+#
+# Nginx and PostgreSQL are NOT managed here. They are persistent system services
+# that this unit has no business starting, stopping, or depending on.
+
+[Unit]
+Description=Purrenade API (Laravel dev server, 127.0.0.1:8410)
+Documentation=file://@WORKING_DIRECTORY@/docs/architecture/local-development.md
+
+[Service]
+Type=simple
+WorkingDirectory=@WORKING_DIRECTORY@
+
+# The host and port are passed explicitly rather than left to SERVER_HOST and
+# SERVER_PORT in .env. Those remain the source for manual use, but .env is
+# git-ignored and drifts: if either value went missing, artisan serve would
+# silently fall back to 0.0.0.0:8000 — a port this project deliberately avoids,
+# on an interface it deliberately does not expose. One line of duplication is a
+# fair price for a service that cannot land somewhere unintended.
+ExecStart=@PHP_BIN@ artisan serve --host=127.0.0.1 --port=8410
+
+# Restart when it crashes; do not fight a deliberate `systemctl --user stop`.
+Restart=on-failure
+RestartSec=5
+
+# Logs go to the journal: journalctl --user -u purrenade-api
+SyslogIdentifier=purrenade-api
+
+# systemd kills the whole control group, so no child outlives the unit and no
+# orphan is left holding port 8410.
+TimeoutStopSec=20
+
+[Install]
+WantedBy=default.target
