@@ -35,7 +35,15 @@ return [
         'local' => [
             'driver' => 'local',
             'root' => storage_path('app/private'),
-            'serve' => true,
+
+            // `serve => true` registers `GET storage/{path}` *and*
+            // `PUT storage/{path}` on every request. Both are signed-URL gated,
+            // so neither was exploitable — but this service stores and serves no
+            // files, so they were two uncontracted routes, one of them an upload
+            // endpoint, alive only because of a default nobody had chosen. Turn
+            // a capability on when something needs it.
+            'serve' => false,
+
             'throw' => false,
             'report' => false,
         ],

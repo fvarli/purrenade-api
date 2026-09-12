@@ -2,9 +2,13 @@
 
 declare(strict_types=1);
 
+use App\Support\DatabaseHealth;
+use Illuminate\Database\DatabaseManager;
 use Illuminate\Support\Facades\Log;
 
 use function Pest\Laravel\getJson;
+
+use Psr\Log\LoggerInterface;
 
 // /api/v1/health is a READINESS probe: it reports whether this service can
 // actually do its job, which means reaching PostgreSQL. A green light from a
@@ -58,21 +62,28 @@ it('carries no version field, because there is no source of truth for one', func
 
 describe('when the database is unreachable', function (): void {
     beforeEach(function (): void {
-        // A connection definition that cannot succeed, rather than a stubbed
-        // probe. Port 1 is reserved and nothing listens on it, so the driver
-        // fails immediately and deterministically — and the test then exercises
-        // the real catch block with a real PDOException, which is the only way
-        // to prove that real driver detail does not reach the response.
+        // A connection definition that cannot succeed, and the probe pointed at
+        // it — rather than a stubbed probe, and rather than changing the default
+        // connection. Port 1 is reserved and nothing listens on it, so the
+        // driver fails immediately and deterministically, and the test exercises
+        // the real catch block with a real PDOException. That is the only way to
+        // prove that real driver detail does not reach the response.
         //
-        // Nothing outside this test is affected: the suite's own connection is
-        // untouched and the override dies with the request.
+        // The default connection is untouched, which matters: the suite's own
+        // transaction runs on it.
         config([
-            'database.connections.unreachable' => array_merge(
-                (array) config('database.connections.pgsql'),
-                ['host' => '127.0.0.1', 'port' => 1],
-            ),
-            'database.default' => 'unreachable',
+            'database.connections.unreachable' => [
+                ...config('database.connections.pgsql'),
+                'host' => '127.0.0.1',
+                'port' => 1,
+            ],
         ]);
+
+        app()->bind(DatabaseHealth::class, fn ($app): DatabaseHealth => new DatabaseHealth(
+            $app->make(DatabaseManager::class),
+            $app->make(LoggerInterface::class),
+            'unreachable',
+        ));
     });
 
     it('answers 503 rather than a misleading 200', function (): void {

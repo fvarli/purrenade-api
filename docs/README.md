@@ -33,12 +33,16 @@ include `API-`, `AUTH-`, `2FA-`, `ANTI-`, `CACHE-`, `DM-`, `BA-`, `OB-`, `QJ-`,
 
 ---
 
-## 🔴 Two decisions block implementation
+## 🔴 One decision blocks implementation
 
 | ADR | Decision | Blocks |
 | --- | --- | --- |
-| [ADR-0005](decisions/ADR-0005-authentication-and-2fa-strategy.md) | Authentication transport and 2FA strategy | **M2, M3.** Also constrains the approved "Android/iOS must remain possible" requirement. |
 | [ADR-0006](decisions/ADR-0006-run-validation-and-anti-cheat-boundary.md) | Run validation / anti-cheat boundary | **M9, M10.** The largest architectural risk in v1. |
+
+[ADR-0005](decisions/ADR-0005-authentication-and-2fa-strategy.md) — authentication
+transport and 2FA — is **Accepted and implemented (M2)**, with all ten of its
+open parameters resolved. See
+[auth-architecture.md](architecture/auth-architecture.md).
 
 ---
 
@@ -46,6 +50,7 @@ include `API-`, `AUTH-`, `2FA-`, `ANTI-`, `CACHE-`, `DM-`, `BA-`, `OB-`, `QJ-`,
 
 | Document | Contents |
 | --- | --- |
+| [auth-architecture.md](architecture/auth-architecture.md) | **★** How authentication works: Sanctum mode, abilities, sessions, secrets, rate limits, the error contract (M2) |
 | [backend-architecture.md](architecture/backend-architecture.md) | Layering, request lifecycle, thin controllers |
 | [domain-boundaries.md](architecture/domain-boundaries.md) | Auth · progression · runs · leaderboards · admin |
 | [data-model.md](architecture/data-model.md) | **★** PostgreSQL schema shape, constraints, indexes |

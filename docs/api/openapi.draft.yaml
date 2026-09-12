@@ -73,13 +73,15 @@ tags:
   - name: Operational
     description: Infrastructure endpoints. Not product surface.
 
-# Either scheme satisfies an authenticated endpoint. The browser always uses
-# sessionAuth via the Nuxt BFF; nativeBearerAuth is reserved for a future native
-# client and is not implemented in v1. Declaring both records the ADR-0005
-# obligation that no endpoint may assume a browser, a cookie, or a same-site context.
+# One scheme, because there is one credential. Implemented at M2: this API is
+# token-authenticated and stateless, and accepts no cookie at all (Sanctum's
+# stateful-domain list is empty, deliberately — see config/sanctum.php).
+#
+# The browser's session cookie is a **BFF** concern and is not described here: it
+# never reaches this service. The browser-facing contract is documented separately
+# in the frontend repository, so the two layers stay distinguishable.
 security:
-  - sessionAuth: []
-  - nativeBearerAuth: []
+  - sessionToken: []
 
 paths:
   /:
@@ -226,8 +228,19 @@ paths:
       operationId: register
       summary: Register a new player
       description: |
-        APPROVED. Creates an unverified account and dispatches a 6-digit email
-        verification code. Password policy is OPEN (SEC-1).
+        **IMPLEMENTED (M2).** Creates an unverified account, issues a session, and sends a
+        six-digit verification code.
+
+        A session is issued **before** verification because the product routes a new player
+        straight to the code-entry screen (v0.3 boards 02 → 04), and that screen has to be
+        able to call `resend`. The session is narrow: until the code is entered, the
+        verified-email gate confines it to `GET /auth/me`, this flow's two endpoints, and
+        `POST /auth/logout`.
+
+        **Enumeration:** registration inherently reveals that an address is taken. Mitigated
+        by rate limiting and a generic field error rather than a distinguishing message.
+
+        **Side effect:** a queued verification mail, dispatched after commit.
       security: []
       requestBody:
         required: true
@@ -236,10 +249,32 @@ paths:
             schema: { $ref: '#/components/schemas/RegisterRequest' }
       responses:
         '201':
-          description: Account created; a verification code has been dispatched.
+          description: The account was created and a session issued.
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/AuthenticatedPlayer' }
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/AuthenticatedUser' }
+                  status: { type: string, enum: [authenticated] }
+                  meta:
+                    type: object
+                    properties:
+                      token:
+                        type: string
+                        description: |
+                          The session credential. Issued to the **caller** — the BFF for
+                          browser traffic — and never relayed to browser JavaScript.
+                      email_verification: { $ref: '#/components/schemas/EmailVerificationState' }
+                    required: [token]
+                required: [status, data, meta]
+        '409':
+          description: |
+            The address or display name was claimed between validation and commit. The
+            unique indexes are the guarantee; validation is the courtesy.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
         '422': { $ref: '#/components/responses/ValidationFailed' }
         '429': { $ref: '#/components/responses/RateLimited' }
 
@@ -247,10 +282,26 @@ paths:
     post:
       tags: [Auth]
       operationId: login
-      summary: Authenticate with email and password
+      summary: Sign in with email and password
       description: |
-        APPROVED. On success, returns either an authenticated player or a 2FA
-        challenge requirement. The credential mechanism is OPEN (ADR-0005).
+        **IMPLEMENTED (M2).** The first factor. Ends in one of two states, and `meta.status`
+        says which:
+
+        - `authenticated` — a session token is issued.
+        - `two_factor_required` — a short-lived challenge token is issued instead, and no
+          session exists yet. A correct password alone never produces a credential.
+
+        Both are `200`: the password was correct in both cases, and a discriminated status
+        is easier to branch on than a status code meaning "correct, but not finished".
+
+        **Enumeration resistance, two rules.** An unknown address and a wrong password
+        return an identical `invalid_credentials` problem — field for field. And an unknown
+        address still costs a password-hash comparison, so response timing does not
+        distinguish the two either.
+
+        An **unverified** account may sign in; it is routed to verification by the gate
+        rather than refused at the door, because refusing here would reveal which addresses
+        are registered but unconfirmed.
       security: []
       requestBody:
         required: true
@@ -259,111 +310,51 @@ paths:
             schema: { $ref: '#/components/schemas/LoginRequest' }
       responses:
         '200':
-          description: Authenticated, or a two-factor challenge is required.
+          description: The password was accepted.
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/LoginResult' }
-        '401': { $ref: '#/components/responses/Unauthenticated' }
-        '422': { $ref: '#/components/responses/ValidationFailed' }
-        '429': { $ref: '#/components/responses/RateLimited' }
-
-  /auth/logout:
-    post:
-      tags: [Auth]
-      operationId: logout
-      summary: End the current session
-      description: APPROVED. Revokes the credential used by this request.
-      responses:
-        '204':
-          description: Session ended.
-        '401': { $ref: '#/components/responses/Unauthenticated' }
-
-  /auth/email/verify:
-    post:
-      tags: [Auth]
-      operationId: verifyEmail
-      summary: Verify the email address with a 6-digit code
-      description: |
-        APPROVED. Verification uses a 6-digit code, not a magic link
-        (Claude Design v0.3 board 04). Code TTL and attempt limits are OPEN.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/EmailVerifyRequest' }
-      responses:
-        '200':
-          description: Email verified.
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/AuthenticatedResult'
+                  - $ref: '#/components/schemas/TwoFactorRequiredResult'
+                discriminator:
+                  propertyName: status
+                  mapping:
+                    authenticated: '#/components/schemas/AuthenticatedResult'
+                    two_factor_required: '#/components/schemas/TwoFactorRequiredResult'
+        '401':
+          description: |
+            `invalid_credentials`. One code for every failure — see the description.
           content:
-            application/json:
-              schema: { $ref: '#/components/schemas/AuthenticatedPlayer' }
-        '422': { $ref: '#/components/responses/ValidationFailed' }
-        '429': { $ref: '#/components/responses/RateLimited' }
-
-  /auth/email/verify/resend:
-    post:
-      tags: [Auth]
-      operationId: resendEmailVerification
-      summary: Resend the email verification code
-      description: |
-        APPROVED. Subject to a resend cooldown; v0.3 board 04 displays 0:42.
-        The exact cooldown is OPEN (SEC-2).
-      responses:
-        '202':
-          description: A new code has been dispatched, or the cooldown is still active.
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/ResendResult' }
-        '429': { $ref: '#/components/responses/RateLimited' }
-
-  /auth/password/forgot:
-    post:
-      tags: [Auth]
-      operationId: forgotPassword
-      summary: Request a password reset link
-      description: |
-        APPROVED. Password reset uses an emailed link, unlike email verification
-        (v0.3 board 06). The response is identical whether or not the address
-        exists, to avoid account enumeration.
-      security: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/ForgotPasswordRequest' }
-      responses:
-        '202':
-          description: If the address exists, a reset link has been dispatched.
-        '422': { $ref: '#/components/responses/ValidationFailed' }
-        '429': { $ref: '#/components/responses/RateLimited' }
-
-  /auth/password/reset:
-    post:
-      tags: [Auth]
-      operationId: resetPassword
-      summary: Set a new password using a reset token
-      description: APPROVED. The token is single-use and time-limited.
-      security: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/ResetPasswordRequest' }
-      responses:
-        '204':
-          description: Password updated.
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
         '422': { $ref: '#/components/responses/ValidationFailed' }
         '429': { $ref: '#/components/responses/RateLimited' }
 
   /auth/2fa/challenge:
     post:
       tags: [Auth]
-      operationId: submitTwoFactorChallenge
-      summary: Complete a two-factor challenge
+      operationId: completeTwoFactorChallenge
+      summary: Complete the two-factor challenge
       description: |
-        APPROVED. Accepts either a TOTP code or a single-use recovery code
-        (v0.3 board 05). Whether the challenge occurs at login or as step-up is
-        OPEN (ADR-0005 question 4).
+        **IMPLEMENTED (M2).** The second factor. Accepts either a TOTP code or a
+        single-use recovery code, and consumes the challenge on success.
+
+        **The only endpoint that mints a session carrying the `two-factor` ability**, which
+        every admin-scoped route requires. There is deliberately no endpoint that adds that
+        ability to an existing token, so a session either passed a challenge when it was
+        created or never will.
+
+        `challenge_token` comes from `POST /auth/login`. For browser traffic the BFF holds
+        it server-side and the browser never receives it — a challenge token in a page is
+        one script-injection defect away from undoing the second factor.
+
+        A wrong TOTP code and a wrong recovery code return the **same** code: which kind of
+        secret was guessed wrongly is not information the caller needs. Attempts are charged
+        to the challenge and capped; exhausting the cap destroys it.
+
+        **Replay is refused.** A TOTP code already accepted within its time step is
+        rejected, per account, durably.
       security: []
       requestBody:
         required: true
@@ -372,73 +363,557 @@ paths:
             schema: { $ref: '#/components/schemas/TwoFactorChallengeRequest' }
       responses:
         '200':
-          description: Challenge passed.
+          description: The second factor was accepted and a session issued.
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/AuthenticatedPlayer' }
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/AuthenticatedUser' }
+                  status: { type: string, enum: [authenticated] }
+                  meta:
+                    type: object
+                    properties:
+                      token: { type: string }
+                      used_recovery_code:
+                        type: boolean
+                        description: |
+                          True when a recovery code was spent. Worth surfacing: it means
+                          the player has one fewer, and it is logged server-side as a
+                          notable event.
+                      recovery_codes_remaining: { type: integer, minimum: 0 }
+                    required: [token, used_recovery_code, recovery_codes_remaining]
+                required: [status, data, meta]
+        '401':
+          description: |
+            `two_factor_challenge_invalid` — unknown, expired, or attempt-exhausted. One
+            code for all three, so a caller holding a guessed token learns nothing about
+            whether it ever existed.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '409':
+          description: |
+            `two_factor_not_enabled` — 2FA was turned off between login and this request.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '422':
+          description: |
+            `two_factor_code_invalid` for a wrong code, or `validation_failed` for a
+            malformed request.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /auth/logout:
+    post:
+      tags: [Auth]
+      operationId: logout
+      summary: End this session
+      description: |
+        **IMPLEMENTED (M2).** Deletes the token row, so the credential stops existing —
+        revocation is real, not a cookie being forgotten.
+
+        This session only. Other devices are untouched; `DELETE /auth/sessions` is the
+        endpoint for that intent.
+
+        Reachable with an unverified account: a player must always be able to leave.
+      responses:
+        '204':
+          description: The session has ended.
         '401': { $ref: '#/components/responses/Unauthenticated' }
+
+  /auth/me:
+    get:
+      tags: [Auth]
+      operationId: me
+      summary: The authenticated account's own state
+      description: |
+        **IMPLEMENTED (M2).** How a client restores state after a page refresh: the browser
+        holds only an opaque BFF cookie, so on every fresh load the BFF asks this endpoint
+        who the session belongs to.
+
+        Reports **facts, not conclusions** — "email is verified", "2FA is enabled", "this
+        session passed a challenge" — and the client derives its own state from them.
+
+        One of exactly four endpoints an **unverified** account may reach: a player who
+        cannot ask "am I verified?" cannot be told to verify.
+      responses:
+        '200':
+          description: The caller's own account.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/AuthenticatedUser' }
+                  meta:
+                    type: object
+                    description: |
+                      Present only while the address is unverified. A verified account has
+                      no use for a resend countdown, and sending one would invite a stale
+                      timer.
+                    properties:
+                      email_verification: { $ref: '#/components/schemas/EmailVerificationState' }
+                required: [data]
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+
+  /auth/email/verify:
+    post:
+      tags: [Auth]
+      operationId: verifyEmail
+      summary: Verify the email address with a six-digit code
+      description: |
+        **IMPLEMENTED (M2).** A six-digit code, not a magic link (v0.3 board 04).
+
+        Six digits is a keyspace of one million, so the security of this flow is entirely
+        in the surrounding rules: a **10-minute TTL**, a **5-attempt cap** per code after
+        which the code is destroyed, a **42-second resend cooldown**, and rate limits on
+        both submission and resend.
+
+        Codes are **hashed at rest** with the application's slow hasher — a fast digest of
+        six digits is reversible by exhaustive search — and are **single use**, consumed on
+        success.
+
+        Authenticated, which removes the enumeration surface entirely: there is no address
+        parameter to probe, and a code is looked up by the caller's own id, so a code issued
+        for one account cannot verify another regardless of who holds it.
+      responses:
+        '200':
+          description: The address is verified.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/AuthenticatedUser' }
+                required: [data]
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422':
+          description: |
+            `verification_code_invalid`, `verification_code_expired`,
+            `verification_code_missing`, or `validation_failed` for a malformed code.
+            A malformed code spends no attempt — it is not a guess.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                code:
+                  type: string
+                  pattern: '^\d{6}$'
+                  description: |
+                    Exactly six digits, as a **string**. `000042` is a valid code; treating
+                    it as an integer would silently make it `42`.
+              required: [code]
+
+  /auth/email/verify/resend:
+    post:
+      tags: [Auth]
+      operationId: resendVerificationEmail
+      summary: Send a new verification code
+      description: |
+        **IMPLEMENTED (M2).** Issuing a new code **invalidates the previous one**, so the
+        older mail stops working the instant this succeeds. Without that, every resend would
+        widen an attacker's window rather than refreshing it.
+
+        The cooldown returns **`429` with `retry_after`**, not a generic error, because the
+        design renders a live countdown (v0.3 board 04 shows `0:42`) and can only do that if
+        the server says how long is left.
+
+        The strictest limits in the product: an unlimited endpoint that mails a
+        caller-supplied address is a spam relay.
+      responses:
+        '200':
+          description: A new code is on its way.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  meta:
+                    type: object
+                    properties:
+                      email_verification: { $ref: '#/components/schemas/EmailVerificationState' }
+                    required: [email_verification]
+                required: [meta]
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '429':
+          description: |
+            `verification_resend_cooldown` while the 42 seconds have not elapsed, or
+            `rate_limited` when the hourly allowance is spent. Both carry `retry_after`.
+          headers:
+            Retry-After:
+              schema: { type: integer, minimum: 0 }
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /auth/password/forgot:
+    post:
+      tags: [Auth]
+      operationId: requestPasswordReset
+      summary: Request a password-reset link
+      description: |
+        **IMPLEMENTED (M2).** A link, deliberately unlike verification's code (v0.3 board
+        06), so a player cannot confuse one flow for the other.
+
+        **The response is identical whether or not the address exists** — unknown address,
+        known address, even a mail-send failure all return the same `202` body. Anything
+        that distinguishes them makes this an account-existence oracle that needs no
+        credentials to query, and the design's own copy depends on the server actually
+        behaving this way.
+
+        The link points at the **frontend**, not at this API.
+
+        Tokens are hashed at rest, single use, and time-limited; the broker verifies the
+        token and the address as a pair.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                email: { type: string, format: email, maxLength: 255 }
+              required: [email]
+      responses:
+        '202':
+          description: |
+            Accepted. Says nothing about whether the address is registered.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, enum: [accepted] }
+                  meta:
+                    type: object
+                    properties:
+                      detail: { type: string }
+                required: [status, meta]
         '422': { $ref: '#/components/responses/ValidationFailed' }
         '429': { $ref: '#/components/responses/RateLimited' }
+
+  /auth/password/reset:
+    post:
+      tags: [Auth]
+      operationId: resetPassword
+      summary: Set a new password using a reset token
+      description: |
+        **IMPLEMENTED (M2).** Completes the reset and **revokes every session**, including
+        any the caller holds: a reset normally answers a suspected compromise, so the point
+        is to evict whoever else is signed in — which has to include sessions this request
+        cannot identify.
+
+        Applies the **same password policy as registration**. A reset path that accepted a
+        weaker password is how a policy quietly becomes advisory.
+
+        ### The invariant — APPROVED, regression gate S8
+
+        **A completed reset never touches two-factor authentication.** Not the enrolment
+        flag, not the TOTP secret, not one recovery code, and it marks no challenge as
+        satisfied. The next login is **still challenged**.
+
+        Email already controls password reset. If a reset also cleared 2FA, compromising a
+        mailbox would compromise the entire account in one step and the second factor would
+        defend against precisely the attack it exists to stop. A player who has lost their
+        authenticator uses recovery codes, which is a separate process.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ResetPasswordRequest' }
+      responses:
+        '200':
+          description: The password was changed. Every session has been revoked.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, enum: [password_reset] }
+                  meta:
+                    type: object
+                    properties:
+                      detail: { type: string }
+                required: [status, meta]
+        '422':
+          description: |
+            `reset_token_invalid` for an unknown address, a wrong token **or** an expired
+            one — one code for all three, so a caller holding a guessed token cannot learn
+            whether the address exists. `validation_failed` for a policy violation.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /auth/password:
+    put:
+      tags: [Auth]
+      operationId: updatePassword
+      summary: Change the password from inside a session
+      description: |
+        **IMPLEMENTED (M2).** Requires `current_password`: an open session is not proof that
+        the account's owner is at the keyboard, which is exactly the borrowed-laptop and
+        stolen-session case this guards.
+
+        Ends every **other** session and keeps this one. A deliberate change by someone who
+        can already prove the old password is not the same event as a reset, and signing the
+        player out of the screen they just used would be friction with no security value.
+
+        Two-factor state is untouched, for the same reason as in the reset flow.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdatePasswordRequest' }
+      responses:
+        '204':
+          description: The password was changed and other sessions ended.
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /auth/2fa:
+    get:
+      tags: [Auth]
+      operationId: getTwoFactorState
+      summary: Two-factor state for this account
+      description: |
+        **IMPLEMENTED (M2).** State, never secrets: whether 2FA is on, whether an enrolment
+        is half-finished, how many recovery codes remain, and whether the role makes it
+        mandatory. The TOTP secret is never returned here.
+
+        `recovery_codes_remaining` lets the UI warn a player who has nearly exhausted them
+        — the state in which losing an authenticator stops being recoverable.
+      responses:
+        '200':
+          description: Current two-factor state.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/TwoFactorState' }
+                required: [data]
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
 
   /auth/2fa/enable:
     post:
       tags: [Auth]
       operationId: beginTwoFactorEnrolment
-      summary: Begin TOTP enrolment
-      description: APPROVED. Returns provisioning data for an authenticator app.
+      summary: Begin two-factor enrolment
+      description: |
+        **IMPLEMENTED (M2).** Generates a secret and returns the data needed to display it.
+
+        **2FA is not active after this call.** The secret is stored, but enrolment completes
+        only when `POST /auth/2fa/confirm` proves the player can produce a code from it.
+        Enabling 2FA in one step against a secret the player never successfully scanned
+        locks them out of their own account, with no self-service way back.
+
+        Requires `current_password`: this begins a change to the account's defences.
+
+        Calling it again before confirming **replaces** the secret and discards any recovery
+        codes from a previous enrolment — an old printout must not bypass a new second
+        factor.
+
+        The provisioning data is returned three ways because a player on the same device as
+        their authenticator cannot scan their own screen, and one on a locked-down phone may
+        have to type the secret.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CurrentPasswordRequest' }
       responses:
         '200':
-          description: Enrolment started; awaiting confirmation.
+          description: Enrolment started. 2FA is still off.
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/TwoFactorEnrolment' }
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/TwoFactorEnrolment' }
+                  status: { type: string, enum: [two_factor_pending] }
+                  meta:
+                    type: object
+                    properties:
+                      detail: { type: string }
+                required: [data]
         '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+        '429': { $ref: '#/components/responses/RateLimited' }
 
   /auth/2fa/confirm:
     post:
       tags: [Auth]
       operationId: confirmTwoFactorEnrolment
-      summary: Confirm TOTP enrolment and issue recovery codes
+      summary: Prove possession and switch two-factor on
       description: |
-        APPROVED. Recovery codes are returned exactly once and are stored hashed.
-        Count and regeneration policy are OPEN (ADR-0005 question 6).
+        **IMPLEMENTED (M2).** Verifies a live code against the pending secret, activates
+        2FA, and issues recovery codes.
+
+        **The recovery codes in this response are the only time they are ever
+        transmitted.** They are stored hashed and there is no endpoint that can show them
+        again. A player who misses them regenerates — which invalidates the set they lost,
+        as it should.
+
+        No `current_password`: the caller already re-authenticated to *start* enrolment, and
+        this step is itself a possession proof. Asking again would add friction to the one
+        screen where the player is already juggling two devices.
+
+        This does **not** upgrade the current session to one that passed a challenge.
+        Enabling 2FA is not the same event as proving it at sign-in, and admin access
+        depends on the difference.
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/TwoFactorConfirmRequest' }
+            schema:
+              type: object
+              properties:
+                code: { type: string, pattern: '^\d{6}$' }
+              required: [code]
       responses:
         '200':
-          description: Two-factor authentication enabled.
+          description: Two-factor authentication is now enabled.
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/RecoveryCodes' }
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/AuthenticatedUser' }
+                  status: { type: string, enum: [two_factor_enabled] }
+                  meta:
+                    type: object
+                    properties:
+                      recovery_codes:
+                        type: array
+                        items: { type: string }
+                        description: Shown exactly once. Never retrievable again.
+                      detail: { type: string }
+                    required: [recovery_codes]
+                required: [status, data, meta]
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422':
+          description: '`two_factor_code_invalid`, or `validation_failed`.'
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /auth/2fa/recovery-codes:
+    post:
+      tags: [Auth]
+      operationId: regenerateRecoveryCodes
+      summary: Issue a new set of recovery codes
+      description: |
+        **IMPLEMENTED (M2).** The previous set stops working immediately. A player asking
+        for new codes is saying the old list is lost or exposed; leaving it valid would
+        answer a security action by doubling the number of live bypasses.
+
+        Requires `current_password`. Codes are returned once, in this response.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CurrentPasswordRequest' }
+      responses:
+        '200':
+          description: A new set, replacing the previous one.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, enum: [recovery_codes_regenerated] }
+                  meta:
+                    type: object
+                    properties:
+                      recovery_codes:
+                        type: array
+                        items: { type: string }
+                      detail: { type: string }
+                    required: [recovery_codes]
+                required: [status, meta]
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '422': { $ref: '#/components/responses/ValidationFailed' }
+        '429': { $ref: '#/components/responses/RateLimited' }
 
   /auth/2fa/disable:
     post:
       tags: [Auth]
       operationId: disableTwoFactor
-      summary: Disable two-factor authentication
+      summary: Turn two-factor authentication off
       description: |
-        APPROVED. Forbidden for the admin role: 2FA is mandatory for admins and
-        this endpoint returns 403 for them.
+        **IMPLEMENTED (M2).** Clears the secret and every recovery code. Requires
+        `current_password`.
+
+        **Refused for administrators** with `admin_two_factor_mandatory` (403). 2FA is
+        mandatory for that role and an admin cannot opt out — the refusal lives in the
+        service as well as at the endpoint, so the destructive path cannot be reached
+        without passing it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CurrentPasswordRequest' }
       responses:
         '204':
-          description: Two-factor authentication disabled.
-        '403': { $ref: '#/components/responses/Forbidden' }
+          description: Two-factor authentication is off.
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403':
+          description: |
+            `admin_two_factor_mandatory` for an administrator, or `email_not_verified`.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+        '429': { $ref: '#/components/responses/RateLimited' }
 
   /auth/sessions:
     get:
       tags: [Auth]
       operationId: listSessions
-      summary: List active sessions and devices
+      summary: List this account's active sessions
       description: |
-        APPROVED (v0.3 board 20). Shows device, approximate location and relative
-        last-seen time, and marks the current session.
+        **IMPLEMENTED (M2).** One row per signed-in device (v0.3 board 20), newest first,
+        with the caller's own session flagged so the UI can label it and avoid presenting
+        "sign out" as though it referred to somewhere else.
+
+        Ordered by a **total order**, so the list does not reshuffle between reads of the
+        same data.
+
+        **Three deliberate omissions.** The token itself, obviously — but also the database
+        id, replaced by an unguessable `id` so a client can only name sessions it was shown;
+        and **IP address and derived location**, which are not recorded at all. v0.3 shows an
+        approximate location; that needs a geo-IP source and a retention policy decided
+        together (**AUTH-4, OPEN**), and storing the address "for later" would create the
+        personal-data obligation before the decision.
       responses:
         '200':
-          description: Active sessions.
+          description: The caller's sessions.
           content:
             application/json:
               schema:
@@ -446,36 +921,78 @@ paths:
                 properties:
                   data:
                     type: array
-                    description: Active sessions for the authenticated player.
                     items: { $ref: '#/components/schemas/Session' }
                 required: [data]
         '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
     delete:
       tags: [Auth]
-      operationId: revokeAllSessions
-      summary: Sign out of all devices
-      description: APPROVED. Revocation takes effect immediately.
-      responses:
-        '204':
-          description: All sessions revoked.
-        '401': { $ref: '#/components/responses/Unauthenticated' }
+      operationId: revokeOtherSessions
+      summary: Sign out every other device
+      description: |
+        **IMPLEMENTED (M2).** Revokes all sessions **except** the caller's own.
 
-  /auth/sessions/{sessionId}:
+        **Resolves AUTH-2.** The action a player is taking is "get everyone else out", and
+        `POST /auth/logout` already exists for the other intent; ending the caller's own
+        session here would make every use of this control end at the login screen.
+
+        Requires `current_password`, because it evicts sessions the caller cannot see.
+
+        Scoped to the caller's own account in the query itself — an ownership check written
+        as a separate step is a step somebody can forget.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CurrentPasswordRequest' }
+      responses:
+        '200':
+          description: Other sessions ended.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, enum: [sessions_revoked] }
+                  meta:
+                    type: object
+                    properties:
+                      revoked_count: { type: integer, minimum: 0 }
+                    required: [revoked_count]
+                required: [status, meta]
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /auth/sessions/{session}:
     delete:
       tags: [Auth]
       operationId: revokeSession
-      summary: Revoke a single session
-      description: APPROVED. Revocation takes effect immediately.
+      summary: Revoke one session
+      description: |
+        **IMPLEMENTED (M2).** Deletes the token row, so the credential stops existing.
+
+        **`404`, not `403`, for a session that is not the caller's.** A `403` would confirm
+        that the session exists and belongs to somebody, which makes this an existence
+        oracle over a table of session identifiers. `docs/security/authorization-and-roles.md`
+        §6 draws that line explicitly, and this is the case it draws it for.
+
+        Revoking one's own session is permitted — it is simply a sign-out.
       parameters:
-        - name: sessionId
+        - name: session
           in: path
           required: true
-          description: Identifier of the session to revoke.
-          schema: { type: string }
+          description: |
+            The session's opaque `id` from `GET /auth/sessions`, never a database key.
+          schema: { type: string, format: uuid }
       responses:
         '204':
-          description: Session revoked.
+          description: The session has been revoked.
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
 
   /game-runs:
     post:
@@ -545,8 +1062,8 @@ paths:
         '409':
           description: The same idempotency key was used with a different request body.
           content:
-            application/json:
-              schema: { $ref: '#/components/schemas/ErrorResponse' }
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
         '422': { $ref: '#/components/responses/ValidationFailed' }
         '429': { $ref: '#/components/responses/RateLimited' }
 
@@ -701,25 +1218,72 @@ paths:
     patch:
       tags: [Profile]
       operationId: updateProfile
-      summary: Update profile and settings
+      summary: Update the player's display name
       description: |
-        APPROVED. Covers locale, favourite character, and audio/motion settings.
+        **PARTIALLY IMPLEMENTED (M2): display name only.**
 
-        **OPEN (#10):** whether audio settings are on/off toggles or volume
-        levels — v0.3 contradicts itself between the pause and settings screens.
-        The schema below models toggles provisionally and must be revisited.
+        Locale, favourite character and audio/motion settings are not yet accepted. They
+        belong with profile and settings work, and one of them is still undecided —
+        **OPEN (#10):** whether audio settings are on/off toggles or volume levels, which
+        v0.3 contradicts itself about between the pause and settings screens.
+
+        Changing an email address is deliberately **not** part of this endpoint. It needs its
+        own verification flow — a code to the new address, with the old one retained until
+        that succeeds — which is a feature rather than a field.
+
+        **Rate-limited two ways**, because the leaderboard shows this name to everyone and
+        rapid churn is an impersonation and evasion tool rather than self-expression: a
+        named limiter caps changes per day, and a timestamp on the account gives the client
+        a concrete `retry_after`. The timestamp is what makes the cooldown real — a limiter
+        bucket disappears when the cache does.
+
+        Re-submitting the current name, including a change of casing only, is not a rename
+        and does not spend the cooldown.
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/UpdateProfileRequest' }
+            schema:
+              type: object
+              properties:
+                display_name:
+                  type: string
+                  minLength: 3
+                  maxLength: 20
+                  description: |
+                    Same APPROVED rules as registration, and the same case-insensitive
+                    uniqueness — compared on the application-normalised form.
+              required: [display_name]
       responses:
         '200':
-          description: Updated profile.
+          description: The updated account.
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/Profile' }
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/AuthenticatedUser' }
+                required: [data]
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409':
+          description: |
+            `conflict` — the name was claimed between validation and commit. The unique
+            index is the guarantee.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
         '422': { $ref: '#/components/responses/ValidationFailed' }
+        '429':
+          description: |
+            `display_name_change_cooldown` while the per-account cooldown is running, or
+            `rate_limited` when the daily allowance is spent. Both carry `retry_after`.
+          headers:
+            Retry-After:
+              schema: { type: integer, minimum: 0 }
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
 
   /profile/delete:
     post:
@@ -734,6 +1298,55 @@ paths:
         '202':
           description: Deletion requested.
         '401': { $ref: '#/components/responses/Unauthenticated' }
+
+  /admin/overview:
+    get:
+      tags: [Admin]
+      operationId: adminOverview
+      summary: Minimum administrative surface
+      description: |
+        **IMPLEMENTED (M2).** Exists to make the admin access-control decisions testable,
+        and for nothing else. The approved capability set — user lookup, suspension, run
+        inspection and invalidation, name moderation, audit inspection — is M13 work
+        (**AD-5**); building any of it now would be scope with no authorization question
+        left to answer.
+
+        What it does prove, on every request, through the route group's middleware:
+
+        1. the caller is an **administrator**;
+        2. their address is **verified**;
+        3. they have **enrolled** a second factor;
+        4. **this session actually passed a two-factor challenge**.
+
+        Four conditions, each refused with its own stable code, and four negative tests. The
+        fourth is the one that is easy to get wrong: a token minted by a password-only login
+        — from before enrolment, or by any path that skipped the challenge — is refused even
+        though the account *has* 2FA. The ability is welded onto the credential when it is
+        issued and no endpoint adds it later.
+
+        Enforcement is on the route **group**, so a route added to the admin surface later
+        inherits all four. `docs/security/authorization-and-roles.md` §5 requires exactly
+        that: a per-route annotation is one forgotten line away from a privileged bypass.
+      responses:
+        '200':
+          description: Aggregate state, visible to a fully authenticated administrator.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/AdminOverview' }
+                required: [data]
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403':
+          description: |
+            `admin_role_required` for a non-admin, `email_not_verified` for an unverified
+            admin, or `admin_two_factor_required` when 2FA is not enrolled **or** this
+            session never passed a challenge.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '429': { $ref: '#/components/responses/RateLimited' }
 
   /admin/players:
     get:
@@ -770,62 +1383,190 @@ paths:
 
 components:
   securitySchemes:
-    sessionAuth:
-      type: apiKey
-      in: cookie
-      name: purrenade_session
-      description: |
-        **APPROVED (ADR-0005).** Browser traffic reaches this API through the **Nuxt BFF**,
-        which holds the server-side session and attaches the upstream credential. The
-        browser itself carries only an `HttpOnly`, `Secure`, `SameSite=Lax` session cookie
-        set by the BFF, and **never** a bearer token in `localStorage` or `sessionStorage`.
-
-        CSRF is enforced **at the BFF** for browser traffic; this API is not reached by
-        ambient browser authority.
-
-        Laravel remains the authentication authority — the BFF is a client of it and makes
-        no authorization decision.
-    nativeBearerAuth:
+    sessionToken:
       type: http
       scheme: bearer
       description: |
-        **RESERVED — not implemented in v1.**
+        **IMPLEMENTED (M2).** A Sanctum personal access token, presented as
+        `Authorization: Bearer <token>`. One token is one signed-in device — the rows it
+        addresses are what `/auth/sessions` lists and revokes.
 
-        A future Android/iOS client authenticates **directly against this API** with a
-        bearer credential, bypassing the BFF, because a native shell cannot rely on
-        same-site cookies. The scheme is declared so the contract records the obligation
-        that **no endpoint may assume a browser, a cookie, or a same-site context**.
+        **Two callers, one scheme, and that is the point (ADR-0005):**
 
-        Tokens live in platform secure storage. No browser client ever uses this scheme.
+        - **Browser.** The token is issued to the **Nuxt BFF**, which keeps it in its own
+          server-side session and attaches it upstream. It never reaches browser
+          JavaScript, and no bearer token is stored in `localStorage` or `sessionStorage`.
+          The browser's only credential is an `HttpOnly`, `Secure`, `SameSite=Lax` cookie
+          set by the BFF, which this API never sees.
+
+        - **Future native client.** Authenticates directly against these same endpoints
+          with the same scheme, bypassing the BFF. Not implemented in v1; the obligation
+          it places on this contract is that **no endpoint may assume a browser, a cookie,
+          or a same-site context**.
+
+        **Abilities record how the session was authenticated.** Every token carries
+        `session`; only a token minted by `POST /auth/2fa/challenge` also carries
+        `two-factor`, and no endpoint adds that ability to an existing token. Admin-scoped
+        routes require it, which is how "this session passed a second factor" is
+        distinguished from "this account has a second factor". Tokens are never issued
+        with the `*` wildcard.
+
+        **CSRF is not a concern on this hop.** The BFF is not a browser and attaches the
+        credential explicitly, so no ambient authority exists here. CSRF is enforced at the
+        BFF, where the cookie is.
+
+        Laravel remains the authentication authority. The BFF carries credentials; it makes
+        no authorization decision.
 
   responses:
     Unauthenticated:
-      description: Not authenticated, or the credential has expired.
+      description: |
+        No credential, or one that no longer resolves. `code`: `unauthenticated`.
       content:
-        application/json:
-          schema: { $ref: '#/components/schemas/ErrorResponse' }
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
     Forbidden:
-      description: Authenticated but not permitted, including when admin 2FA is unsatisfied.
+      description: |
+        Authenticated but not permitted. The `code` says which gate refused:
+        `forbidden`, `email_not_verified`, `admin_role_required`,
+        `admin_two_factor_required`, or `admin_two_factor_mandatory`.
       content:
-        application/json:
-          schema: { $ref: '#/components/schemas/ErrorResponse' }
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
     NotFound:
-      description: Not found, or not visible to this caller.
+      description: |
+        Not found — **or** found and not visible to this caller. The two are deliberately
+        indistinguishable, so the endpoint is not an existence oracle. `code`: `not_found`.
       content:
-        application/json:
-          schema: { $ref: '#/components/schemas/ErrorResponse' }
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Conflict:
+      description: |
+        The request contradicts current state. `code`: `conflict`,
+        `email_already_verified`, `two_factor_already_enabled`, `two_factor_not_enabled`,
+        or `two_factor_not_pending`.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
     ValidationFailed:
-      description: The request failed validation.
+      description: |
+        The request failed validation. Carries `errors`, a map of field name to a list of
+        `{code, message}` — branch on `code`, never on `message`.
       content:
-        application/json:
-          schema: { $ref: '#/components/schemas/ErrorResponse' }
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
     RateLimited:
-      description: Too many requests. Honour the retry signal; do not retry in a loop.
+      description: |
+        Too many requests. Carries `retry_after` in seconds **and** a `Retry-After`
+        header. Honour it; never retry in a loop.
+      headers:
+        Retry-After:
+          description: Seconds to wait before retrying.
+          schema: { type: integer, minimum: 0 }
       content:
-        application/json:
-          schema: { $ref: '#/components/schemas/ErrorResponse' }
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
 
   schemas:
+    Problem:
+      type: object
+      description: |
+        **The** error shape. RFC 9457 Problem Details, served as
+        `application/problem+json`, for every error this API produces — validation,
+        authentication, authorization, conflict, rate limiting, and unexpected failures
+        alike (API-1).
+
+        One shape means a client needs one parser. There is no second envelope anywhere in
+        this contract.
+
+        **Never present:** stack traces, SQL, internal class names, file paths, dependency
+        versions. That holds in every environment, including with debug mode on — a
+        response shape that changes between environments is one nobody can test against.
+      properties:
+        type:
+          type: string
+          format: uri
+          description: |
+            A URN identifying the problem type, always `urn:purrenade:error:{code}`.
+
+            A URN rather than an `https://` URL: RFC 9457 does not require the type to be
+            dereferenceable, and no published documentation site exists to dereference.
+            Inventing a URL that returns 404 would be worse than being honest.
+          examples: ['urn:purrenade:error:validation_failed']
+        title:
+          type: string
+          description: |
+            A short, stable, **English** summary of the problem *type*, not of this
+            occurrence. Not localised — see `detail`.
+        status:
+          type: integer
+          description: The HTTP status, repeated in the body as RFC 9457 specifies.
+          examples: [422]
+        detail:
+          type: string
+          description: |
+            Human-readable explanation of **this occurrence**. For display and logs only.
+            May be reworded or localised at any time, so **never branch on it**.
+        instance:
+          type: string
+          description: The path that produced the problem.
+          examples: ['/api/v1/auth/register']
+        code:
+          type: string
+          description: |
+            **The value clients branch on.** Stable, machine-readable, never localised.
+            Always equal to the tail of `type`, so the two cannot disagree.
+
+            Adding a code is additive and safe. Changing or removing one is breaking and
+            requires a new API version.
+          examples: ['validation_failed']
+        correlation_id:
+          type: string
+          description: |
+            Present on every problem, and echoed in the `X-Correlation-Id` response header.
+            The player can quote it; it appears in this service's logs and in the BFF's.
+        errors:
+          type: object
+          description: |
+            Present on validation failures. Maps a field name to the list of things wrong
+            with it, each with its own stable code — so a client can render "already taken"
+            in Turkish without parsing an English sentence.
+          additionalProperties:
+            type: array
+            items:
+              type: object
+              properties:
+                code:
+                  type: string
+                  description: |
+                    Stable per-field code, e.g. `required`, `taken`, `too_short`,
+                    `too_long`, `email_invalid`, `confirmation_mismatch`,
+                    `password_incorrect`, `password_compromised`, `format_invalid`.
+                message:
+                  type: string
+                  description: Human-readable. For display only.
+              required: [code, message]
+        retry_after:
+          type: integer
+          minimum: 0
+          description: |
+            Present on `429`. Seconds to wait. Also sent as a `Retry-After` header — the
+            header is what proxies and HTTP clients honour, the member is what a countdown
+            in the UI needs.
+      required: [type, title, status, detail, instance, code, correlation_id]
+      examples:
+        - type: urn:purrenade:error:validation_failed
+          title: Validation failed
+          status: 422
+          detail: The given data was invalid.
+          instance: /api/v1/auth/register
+          code: validation_failed
+          correlation_id: 01K5R8Q2M3N4P5Q6R7S8T9V0W1
+          errors:
+            email:
+              - code: taken
+                message: This email address is already registered.
+
     HealthReport:
       type: object
       description: |
@@ -871,74 +1612,333 @@ components:
           required: [application, database]
       required: [success, status, service, environment, timestamp, checks]
 
-    ErrorResponse:
+    AuthenticatedUser:
       type: object
-      description: The single error envelope used by every error response.
+      description: |
+        What a caller is told about their **own** account.
+
+        Reports facts rather than conclusions, so the client derives its state machine from
+        them and the server does not send a state name the client then has to trust.
+
+        Field-level authorization applies: the password hash, the TOTP secret, recovery
+        codes and the remember token are all absent. Recovery codes appear only as a
+        **count** — they are transmitted exactly once, when generated.
       properties:
-        error:
-          type: object
-          description: Error detail.
+        id: { type: integer }
+        display_name: { type: string }
+        email: { type: string, format: email }
+        role: { type: string, enum: [player, admin] }
+        email_verified: { type: boolean }
+        email_verified_at: { type: [string, 'null'], format: date-time }
+        two_factor_enabled:
+          type: boolean
+          description: |
+            True only when a secret exists **and** possession has been confirmed. A
+            half-finished enrolment is `two_factor_pending`, not this.
+        two_factor_pending:
+          type: boolean
+          description: Enrolment started but never confirmed. 2FA is off.
+        two_factor_recovery_codes_remaining:
+          type: integer
+          minimum: 0
+          description: |
+            A count, never the values. Lets the UI warn a player who has nearly exhausted
+            them — the state in which losing an authenticator stops being recoverable.
+        requires_two_factor_enrolment:
+          type: boolean
+          description: |
+            True for an administrator who has not enrolled. A real, reachable state: an
+            operator can promote a player who has no second factor. Reported so the UI can
+            say what to do instead of showing an account that merely appears broken.
+        created_at: { type: [string, 'null'], format: date-time }
+        session:
+          type: [object, 'null']
+          description: The session this response was produced for.
           properties:
-            code:
-              type: string
-              description: Stable, machine-readable, never localized. Clients branch on this.
-            message:
-              type: string
-              description: Human-readable and localized. For display only, never for logic.
-            correlation_id:
-              type: string
-              description: Always present; traceable in server logs.
-            details:
-              type: object
-              description: Field-level errors, each carrying its own stable code.
-              additionalProperties: true
-          required: [code, message, correlation_id]
-      required: [error]
+            id: { type: string, format: uuid }
+            device: { type: string }
+            two_factor_satisfied:
+              type: boolean
+              description: |
+                Whether **this session** passed a two-factor challenge — a different
+                question from whether the account has 2FA, and the one admin access
+                depends on.
+            created_at: { type: [string, 'null'], format: date-time }
+          required: [id, device, two_factor_satisfied]
+      required:
+        - id
+        - display_name
+        - email
+        - role
+        - email_verified
+        - two_factor_enabled
+        - two_factor_pending
+        - two_factor_recovery_codes_remaining
+        - requires_two_factor_enrolment
 
-    RegisterRequest:
+    AuthenticatedResult:
       type: object
-      description: Registration payload. Password policy is OPEN (SEC-1).
-      properties:
-        username: { type: string, description: Public display name. Rules OPEN (LB-3). }
-        email: { type: string, format: email, description: Login identity. }
-        password: { type: string, description: Plaintext over TLS; hashed at rest. }
-        locale: { $ref: '#/components/schemas/Locale' }
-      required: [username, email, password]
-
-    LoginRequest:
-      type: object
-      description: Email and password login.
-      properties:
-        email: { type: string, format: email, description: Registered address. }
-        password: { type: string, description: Plaintext over TLS. }
-      required: [email, password]
-
-    LoginResult:
-      type: object
-      description: Either an authenticated player, or a required two-factor challenge.
+      description: A login that produced a session.
       properties:
         status:
           type: string
-          description: Whether authentication completed or a challenge is required.
-          enum: [authenticated, two_factor_required]
-        player:
-          oneOf:
-            - $ref: '#/components/schemas/Player'
-            - type: 'null'
-          description: Present when authentication completed.
-        challenge_token:
-          oneOf:
-            - type: string
-            - type: 'null'
-          description: Short-lived token identifying the pending two-factor challenge.
-      required: [status]
+          enum: [authenticated]
+          description: |
+            **The discriminator.** Top-level rather than nested in `meta`, because it
+            decides the response shape and a discriminator cannot read a property inside
+            another object. Every envelope in this API that has a `status` puts it here,
+            so the rule is one rule.
+        data: { $ref: '#/components/schemas/AuthenticatedUser' }
+        meta:
+          type: object
+          properties:
+            token:
+              type: string
+              description: |
+                The session credential. For browser traffic this is consumed by the BFF and
+                held server-side; it never reaches browser JavaScript.
+          required: [token]
+      required: [status, data, meta]
 
-    AuthenticatedPlayer:
+    TwoFactorRequiredResult:
       type: object
-      description: An authenticated player and their current state.
+      description: |
+        The password was correct and a second factor is required. **No session exists yet.**
       properties:
-        player: { $ref: '#/components/schemas/Player' }
-      required: [player]
+        status:
+          type: string
+          enum: [two_factor_required]
+        meta:
+          type: object
+          properties:
+            challenge_token:
+              type: string
+              description: |
+                Short-lived, single-purpose, and worth **nothing** on its own: it proves
+                only that the first factor was satisfied. For browser traffic the BFF holds
+                it server-side; the browser never receives it.
+            challenge_expires_at: { type: string, format: date-time }
+            recovery_codes_available:
+              type: boolean
+              description: |
+                So the challenge screen offers the recovery-code path only when one is
+                actually available.
+          required: [challenge_token, challenge_expires_at, recovery_codes_available]
+      required: [status, meta]
+
+    RegisterRequest:
+      type: object
+      properties:
+        display_name:
+          type: string
+          minLength: 3
+          maxLength: 20
+          description: |
+            **APPROVED rules.** 3–20 characters of Unicode letters and digits plus
+            `_ . -`; at least one letter; no leading or trailing punctuation.
+            **Case-insensitive unique**, compared on an application-normalised form (NFKC,
+            case-folded, with the Turkish dotted capital I folded to `i` so `İstanbul` and
+            `istanbul` cannot both exist).
+        email: { type: string, format: email, maxLength: 255 }
+        password:
+          type: string
+          minLength: 12
+          maxLength: 128
+          description: |
+            **12–128 characters, no composition rules.** Length is what resists guessing;
+            mandatory character classes mostly produce predictable passwords. Checked
+            against a breach corpus via k-anonymity — the password itself never leaves the
+            server.
+
+            The maximum is a **validation error, never a silent trim**: a password quietly
+            shortened to fit is one the player cannot reproduce. Hashing is argon2id, which
+            has no length limit (bcrypt would truncate at 72 bytes).
+        password_confirmation: { type: string }
+      required: [display_name, email, password, password_confirmation]
+
+    LoginRequest:
+      type: object
+      properties:
+        email: { type: string, maxLength: 255 }
+        password:
+          type: string
+          description: |
+            Deliberately **not** length-validated here. A login form that rejects a short
+            password before checking it discloses the policy and, worse, distinguishes
+            malformed input from wrong credentials.
+      required: [email, password]
+
+    TwoFactorChallengeRequest:
+      type: object
+      description: |
+        Exactly one of `code` or `recovery_code`.
+      properties:
+        challenge_token:
+          type: string
+          maxLength: 128
+          description: From the `two_factor_required` login response.
+        code:
+          type: string
+          pattern: '^\d{6}$'
+          description: A current TOTP code from the player's authenticator app.
+        recovery_code:
+          type: string
+          maxLength: 64
+          description: |
+            A single-use recovery code. Spending one is logged as a notable event: it means
+            an authenticator was lost — or a stolen printout is being used.
+      required: [challenge_token]
+
+    ResetPasswordRequest:
+      type: object
+      properties:
+        token:
+          type: string
+          description: From the emailed link. Single use and time-limited.
+        email: { type: string, format: email, maxLength: 255 }
+        password: { type: string, minLength: 12, maxLength: 128 }
+        password_confirmation: { type: string }
+      required: [token, email, password, password_confirmation]
+
+    UpdatePasswordRequest:
+      type: object
+      properties:
+        current_password:
+          type: string
+          description: |
+            Re-authentication. An open session is not proof that the account's owner is at
+            the keyboard.
+        password: { type: string, minLength: 12, maxLength: 128 }
+        password_confirmation: { type: string }
+      required: [current_password, password, password_confirmation]
+
+    CurrentPasswordRequest:
+      type: object
+      description: |
+        Re-authentication for a security-sensitive action that needs no other input.
+
+        The password travels on the request itself rather than being "confirmed" once into
+        a window, because this API has no session to remember a confirmation in — it is
+        token-authenticated so a native client can use the same endpoints. Per-request
+        re-authentication is also impossible to leave half-implemented: there is no window
+        that might still be open from an earlier action.
+      properties:
+        current_password: { type: string }
+      required: [current_password]
+
+    EmailVerificationState:
+      type: object
+      properties:
+        resend_available_in:
+          type: integer
+          minimum: 0
+          description: |
+            Seconds until a new code may be requested; `0` when it may be. The cooldown is
+            **42 seconds**, which is the number v0.3 board 04 renders as `(0:42)`. Returned
+            rather than assumed, so the client's countdown cannot drift from the server's
+            refusal.
+        expires_in:
+          type: integer
+          description: Seconds until the current code expires. 600 — a ten-minute TTL.
+      required: [resend_available_in]
+
+    TwoFactorState:
+      type: object
+      properties:
+        enabled: { type: boolean }
+        pending:
+          type: boolean
+          description: Enrolment started; possession not yet proven. 2FA is off.
+        confirmed_at: { type: [string, 'null'], format: date-time }
+        recovery_codes_remaining: { type: integer, minimum: 0 }
+        mandatory:
+          type: boolean
+          description: True for the `admin` role, which cannot disable 2FA.
+      required: [enabled, pending, recovery_codes_remaining, mandatory]
+
+    TwoFactorEnrolment:
+      type: object
+      description: |
+        Provisioning data for a **pending** enrolment. 2FA is not active until confirmed.
+      properties:
+        secret:
+          type: string
+          description: |
+            The base32 secret, for manual entry. Returned because a player on the same
+            device as their authenticator cannot scan their own screen.
+        otpauth_uri:
+          type: string
+          description: '`otpauth://totp/…`, for an authenticator app to consume directly.'
+        qr_code:
+          type: string
+          description: |
+            The QR code as a `data:image/svg+xml;base64,…` URI, rendered server-side.
+
+            A data URI for an `<img>` rather than raw SVG markup, deliberately: raw markup
+            would have to be injected with `v-html`, keeping an XSS sink alive for one
+            screen's convenience. An `<img>` cannot execute script.
+      required: [secret, otpauth_uri, qr_code]
+
+    Session:
+      type: object
+      description: One signed-in device (v0.3 board 20).
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: |
+            Opaque and unguessable, never the database key. A client can only name sessions
+            it was shown.
+        device:
+          type: string
+          description: |
+            A coarse label derived server-side, e.g. "Chrome on Android". Deliberately
+            lossy: enough for a player to recognise their own devices and spot one they do
+            not, without becoming a tracking identifier. The raw User-Agent is never stored.
+        is_current: { type: boolean }
+        two_factor_satisfied: { type: boolean }
+        created_at: { type: [string, 'null'], format: date-time }
+        last_active_at:
+          type: [string, 'null']
+          format: date-time
+          description: Null when the session has not made a request since it was created.
+      required: [id, device, is_current, two_factor_satisfied, created_at, last_active_at]
+
+    AdminOverview:
+      type: object
+      description: |
+        The minimum administrative surface. It exists to make the access-control decisions
+        testable and for nothing else — the approved admin capability set is M13 work.
+
+        Counts are aggregate and contain no personal data, so an endpoint that exists for a
+        test does not become a data-exposure surface of its own.
+      properties:
+        administrator:
+          type: object
+          properties:
+            id: { type: integer }
+            display_name: { type: string }
+          required: [id, display_name]
+        accounts:
+          type: object
+          properties:
+            total: { type: integer }
+            verified: { type: integer }
+            administrators: { type: integer }
+            with_two_factor: { type: integer }
+          required: [total, verified, administrators, with_two_factor]
+        capabilities:
+          type: object
+          properties:
+            available:
+              type: array
+              items: { type: string }
+              description: |
+                Empty in M2, so the frontend can render an honest "not built yet" rather
+                than an empty console.
+            planned_milestone: { type: string }
+          required: [available, planned_milestone]
+      required: [administrator, accounts, capabilities]
 
     Player:
       type: object
@@ -957,81 +1957,6 @@ components:
       type: string
       description: Player-facing language. Turkish is the source locale.
       enum: [tr, en, es]
-
-    EmailVerifyRequest:
-      type: object
-      description: Six-digit email verification code.
-      properties:
-        code: { type: string, description: The 6-digit code from the email. }
-      required: [code]
-
-    ResendResult:
-      type: object
-      description: Resend outcome, including the remaining cooldown.
-      properties:
-        cooldown_remaining_ms:
-          type: integer
-          description: Milliseconds until another resend is permitted.
-      required: [cooldown_remaining_ms]
-
-    ForgotPasswordRequest:
-      type: object
-      description: Request a reset link. The response never reveals whether the address exists.
-      properties:
-        email: { type: string, format: email, description: Address to send the link to. }
-      required: [email]
-
-    ResetPasswordRequest:
-      type: object
-      description: Complete a password reset with a single-use token.
-      properties:
-        token: { type: string, description: Token from the emailed link. }
-        password: { type: string, description: The new password. }
-      required: [token, password]
-
-    TwoFactorChallengeRequest:
-      type: object
-      description: Complete a two-factor challenge with a TOTP or recovery code.
-      properties:
-        challenge_token: { type: string, description: Token issued by the login step. }
-        code: { type: string, description: A 6-digit TOTP code or a single-use recovery code. }
-      required: [challenge_token, code]
-
-    TwoFactorEnrolment:
-      type: object
-      description: Provisioning data for an authenticator app.
-      properties:
-        secret: { type: string, description: 'Shown once, during enrolment only.' }
-        otpauth_uri: { type: string, description: Standard provisioning URI for QR display. }
-      required: [secret, otpauth_uri]
-
-    TwoFactorConfirmRequest:
-      type: object
-      description: Confirm enrolment by proving possession of the secret.
-      properties:
-        code: { type: string, description: A current 6-digit TOTP code. }
-      required: [code]
-
-    RecoveryCodes:
-      type: object
-      description: Recovery codes, returned exactly once and stored hashed thereafter.
-      properties:
-        recovery_codes:
-          type: array
-          description: Single-use backup codes.
-          items: { type: string }
-      required: [recovery_codes]
-
-    Session:
-      type: object
-      description: An active session or device.
-      properties:
-        id: { type: string, description: Session identifier. }
-        device_label: { type: string, description: Human-readable device description. }
-        approximate_location: { type: string, description: Coarse location. Derivation is OPEN. }
-        last_seen_at: { type: string, format: date-time, description: Last activity. }
-        is_current: { type: boolean, description: Whether this is the requesting session. }
-      required: [id, device_label, last_seen_at, is_current]
 
     StartRunRequest:
       type: object
@@ -1315,15 +2240,3 @@ components:
         effects_muted: { type: boolean, description: 'Effects mute, toggled from Pause. Independent of effects_volume.' }
         reduced_motion: { type: boolean, description: Calms animations; also respects the OS preference. }
       required: [locale, music_volume, music_muted, effects_volume, effects_muted, reduced_motion]
-
-    UpdateProfileRequest:
-      type: object
-      description: Partial update of profile and settings.
-      properties:
-        locale: { $ref: '#/components/schemas/Locale' }
-        favourite_character_key: { type: string, description: Must be a selectable character. }
-        music_volume: { type: number, minimum: 0, maximum: 1, description: 'Music volume.' }
-        music_muted: { type: boolean, description: 'Music mute. Independent of volume; unmuting restores the previous non-zero level.' }
-        effects_volume: { type: number, minimum: 0, maximum: 1, description: 'Sound-effects volume.' }
-        effects_muted: { type: boolean, description: 'Effects mute. Independent of volume.' }
-        reduced_motion: { type: boolean, description: Calms animations. }

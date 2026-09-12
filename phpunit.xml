@@ -29,6 +29,26 @@
              See docs/testing/testing-strategy.md §2. -->
         <env name="DB_CONNECTION" value="pgsql"/>
         <env name="DB_URL" value=""/>
+        <!-- Tests run in a schema of their own, inside the same dedicated
+             Purrenade database. RefreshDatabase drops and rebuilds everything in
+             the search path, so sharing `public` with local development would
+             destroy the developer's data on every run — including the account
+             used for manual acceptance.
+
+             A schema rather than a second database on purpose: the application
+             role owns its database and can create a schema in it, but has no
+             CREATEDB privilege (deliberately, since M1). So this isolation needs
+             no superuser step and no sudo, and `tests/TestCase.php` creates the
+             schema if it is missing. -->
+        <env name="DB_SEARCH_PATH" value="purrenade_test"/>
+
+        <!-- Argon2id at production cost is ~50ms per hash. A suite that creates
+             accounts would spend most of its time hashing. Lowered here only;
+             config/hashing.php keeps the real values, and no test asserts
+             anything about the cost. -->
+        <env name="ARGON_MEMORY" value="1024"/>
+        <env name="ARGON_TIME" value="1"/>
+        <env name="ARGON_THREADS" value="1"/>
         <env name="MAIL_MAILER" value="array"/>
         <env name="QUEUE_CONNECTION" value="sync"/>
         <env name="SESSION_DRIVER" value="array"/>

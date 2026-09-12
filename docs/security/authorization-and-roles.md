@@ -41,7 +41,7 @@ role check, and that is where authorization bugs will come from.
 
 ---
 
-## 4. Implementation — PROPOSED
+## 4. Implementation — APPROVED, IMPLEMENTED
 
 | Rule | Detail |
 | --- | --- |
@@ -70,7 +70,7 @@ per-route annotation is one forgotten line away from a privileged bypass.
 
 ---
 
-## 6. Status codes — PROPOSED
+## 6. Status codes — APPROVED, IMPLEMENTED
 
 | Situation | Code |
 | --- | --- |
@@ -86,14 +86,25 @@ existence oracle.
 
 ---
 
-## 7. Verified-email gate — PROPOSED
+## 7. Verified-email gate — APPROVED, IMPLEMENTED (AUTH-1 resolved at M2)
 
-Some endpoints require a **verified** account, not merely an authenticated one —
-run submission and leaderboard participation in particular, since an unverified
-account is a cheap account.
+An authenticated but **unverified** account may reach exactly four endpoints:
 
-**OPEN (AUTH-1):** the exact set. PROPOSED: an unverified player may read their
-profile and complete verification, and nothing else.
+```
+GET  /auth/me
+POST /auth/email/verify
+POST /auth/email/verify/resend
+POST /auth/logout
+```
+
+Enough to learn that verification is required, to complete it, and to leave.
+Everything else waits — **including two-factor enrolment and session
+management**. An unverified account is one whose owner has not been shown to
+control the address, and the cost of waiting is one code.
+
+Enforced by `verified` middleware on the route **group**, so an endpoint added
+later is gated by default. A test enumerates the authenticated routes and asserts
+that exactly those four lack the gate, so the allowance cannot widen unnoticed.
 
 ---
 
@@ -118,6 +129,6 @@ Authorization is tested with **negative cases**, which are the ones that matter:
 | Ref | Question |
 | --- | --- |
 | AD-5 | Per-capability request/response shapes for the approved six-capability admin console, to be contracted at M13 |
-| AUTH-1 | Which endpoints require a verified email |
+| ~~AUTH-1~~ | **Resolved at M2:** four endpoints. §7. |
 | AD-2 | Is more than one admin level needed? |
 | AD-4 | Is admin access restricted by network or device in addition to 2FA? |

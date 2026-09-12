@@ -26,16 +26,44 @@ Neither alone is adequate; together they cover the realistic attacks.
 
 ---
 
-## 2. Classes — PROPOSED
+## 2. Classes and values — APPROVED, IMPLEMENTED (SEC-2 resolved at M2)
 
-| Class | Applies to | Character |
-| --- | --- | --- |
-| **very strict** | Email-sending endpoints: verification resend, forgot password | Few per hour. These endpoints send mail on demand — an unlimited one is a spam relay. |
-| **strict** | Login, 2FA challenge, verification submission, password reset, account deletion | Few per minute, with progressive delay |
-| **submission** | Run start and finish | Bounded by how fast runs can plausibly be played |
-| **normal** | Authenticated reads | Generous; protects against scraping, not against use |
+Every limiter returns **two** limits, both of which must be satisfied.
 
-Concrete values are **OPEN (SEC-2)** and set at M2 against real behavior.
+| Class | Endpoint | Per identifier | Per source |
+| --- | --- | --- | --- |
+| login | `POST /auth/login` | 5/min **and** 20/hour | 20/min |
+| register | `POST /auth/register` | — (no account yet) | 10/hour |
+| 2FA challenge | `POST /auth/2fa/challenge` | 5/min per challenge | 20/min |
+| verification submit | `POST /auth/email/verify` | 10 / 10 min | 30 / 10 min |
+| **verification resend** | `POST /auth/email/verify/resend` | 5/hour | 15/hour |
+| **forgot password** | `POST /auth/password/forgot` | 5/hour | 15/hour |
+| password reset | `POST /auth/password/reset` | — | 10/min |
+| sensitive | 2FA changes, revoke-all, password change | 10/min | — |
+| display name | `PATCH /profile` | 3/day | — |
+| normal | Authenticated reads | 60/min | — |
+| health | `GET /api/v1/health` | — (no identifier) | 60/min |
+| submission | Run start and finish | **Not yet — M9.** Bounded by how fast runs can plausibly be played. |
+
+Readiness was the one public route with no limiter, and it is the one public
+route that queries the database — an unauthenticated cheap `GET` turning into
+unbounded query load. Added at the M2 audit. One dimension only: a readiness
+probe has no identifier, and a monitor is not a user. 60/min is well above any
+sane probe (one per second uses a fifth of it) and far below anything worth using
+as an amplifier.
+
+The two email-sending classes are the strictest in the product: an unlimited
+endpoint that mails a caller-supplied address is a spam relay, and the damage
+lands on the product's own sending reputation.
+
+**Registration is keyed on the source only.** Keying it on the submitted address
+would let an attacker suppress registration for an address by burning its bucket.
+
+**Identifier keys are hashed**, so the cache never holds a plaintext address.
+
+Values live in `App\Support\RateLimits`; registration in
+`App\Providers\RateLimitServiceProvider`. There is no lockout state anywhere —
+see [authentication.md](authentication.md) §7.
 
 ---
 
@@ -83,7 +111,9 @@ be able to enumerate the player base at speed.
 | Response headers | Remaining allowance and reset time on every limited endpoint |
 | `429` | Carries a retry signal the client honours |
 | Keying | Never key on a value the client controls and can vary freely |
-| Failure mode | **OPEN (RL-1):** if the limiter is unavailable, fail open (available but unprotected) or fail closed (protected but down)? For authentication endpoints, failing closed is defensible. |
+| Storage | **IMPLEMENTED** on the database cache store. Adequate at this scale; Redis is CACHE-1, still OPEN. |
+| Response | **IMPLEMENTED** — `429` as an RFC 9457 problem carrying `retry_after` both as a member and as a `Retry-After` header. The header is what proxies and HTTP libraries honour; the member is what a countdown in the UI needs. |
+| Failure mode | **OPEN (RL-1).** Currently fails open, because the limiter store *is* the database — if it is unavailable the application is already down, so failing closed would add nothing. The decision belongs with the adoption of a dedicated limiter store (CACHE-1). |
 
 ---
 
@@ -99,7 +129,7 @@ often before anything else notices.
 
 | Ref | Question |
 | --- | --- |
-| SEC-2 | Concrete limits per class |
-| RL-1 | Fail open or fail closed when the limiter is unavailable? |
+| ~~SEC-2~~ | **Resolved at M2.** §2. |
+| RL-1 | Fail open or fail closed when the limiter is unavailable? §4. |
 | RL-2 | Is Redis adopted for rate limiting, and at which milestone? (CACHE-1) |
-| AUTH-3 | Progressive delay versus lockout |
+| ~~AUTH-3~~ | **Resolved at M2:** progressive throttling, no lockout. |

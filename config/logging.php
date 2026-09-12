@@ -67,6 +67,35 @@ return [
             'replace_placeholders' => true,
         ],
 
+        /*
+        |----------------------------------------------------------------------
+        | security — authentication and authorization events
+        |----------------------------------------------------------------------
+        |
+        | A channel of its own, written through App\Support\AuthLog and nothing
+        | else. Separate from the application log for three reasons:
+        |
+        |  - **Retention differs.** Security events are worth keeping longer than
+        |    debug output, and mixing them means one policy has to serve both.
+        |  - **Shipping differs.** These are the lines an alert would watch;
+        |    finding them inside general application noise is the reason such
+        |    alerts get abandoned.
+        |  - **Content is constrained.** One writer means the field set is fixed
+        |    and no credential can reach it. See AuthLog.
+        |
+        | `info` and above: AuthLog's own levels are info for normal events and
+        | warning for failures, so nothing security-relevant is filtered out,
+        | while debug chatter cannot leak into this file.
+        |
+        */
+        'security' => [
+            'driver' => env('LOG_SECURITY_DRIVER', 'daily'),
+            'path' => storage_path('logs/security.log'),
+            'level' => 'info',
+            'days' => (int) env('LOG_SECURITY_DAYS', 90),
+            'replace_placeholders' => true,
+        ],
+
         'daily' => [
             'driver' => 'daily',
             'path' => storage_path('logs/laravel.log'),

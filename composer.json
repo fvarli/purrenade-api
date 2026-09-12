@@ -11,7 +11,9 @@
     "license": "proprietary",
     "require": {
         "php": "^8.4",
+        "laravel/fortify": "^1.39",
         "laravel/framework": "^13.17",
+        "laravel/sanctum": "^4.3",
         "laravel/tinker": "^3.0"
     },
     "require-dev": {

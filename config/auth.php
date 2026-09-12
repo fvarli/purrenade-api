@@ -116,4 +116,30 @@ return [
 
     'password_timeout' => env('AUTH_PASSWORD_TIMEOUT', 10800),
 
+    /*
+    |--------------------------------------------------------------------------
+    | Compromised-Password Check
+    |--------------------------------------------------------------------------
+    |
+    | SEC-1 requires new passwords to be breach-checked against the Pwned
+    | Passwords range API. Only the first five characters of the SHA-1 leave
+    | this process; the password and its full hash never do.
+    |
+    | The timeout is in-band on register, password reset and password change,
+    | all reachable without authentication, so it is short on purpose. The
+    | framework's 30-second default would let a hung third party hold our own
+    | workers open. There is no retry: retrying in the request path multiplies
+    | exactly the problem the timeout bounds.
+    |
+    | The failure policy is FAIL OPEN and is not configurable. A provider that
+    | cannot be reached must not be able to refuse a password, because that
+    | would take registration, reset and password change offline together. Every
+    | skipped check is logged on the security channel. See App\Support\BreachCheck.
+    |
+    */
+
+    'breach_check' => [
+        'timeout' => (int) env('AUTH_BREACH_CHECK_TIMEOUT', 3),
+    ],
+
 ];

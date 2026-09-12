@@ -31,17 +31,35 @@ Authentication is **required**; Purrenade is not guest-first.
 | Comparison | Constant-time |
 | Rehashing | Transparent on login when parameters change |
 
-### Password policy — OPEN (SEC-1)
+### Password policy — APPROVED, IMPLEMENTED (SEC-1 resolved at M2)
 
-Nothing in the references specifies one. What must be decided:
-
-| Question | PROPOSED direction |
+| Rule | Value |
 | --- | --- |
-| Minimum length | Length is the property that matters; favour a meaningful minimum over composition rules |
-| Composition requirements | Modern guidance is against mandatory character-class rules — they produce predictable passwords |
-| **Breach-list checking** | Recommended. Credential stuffing is the realistic attack, and rejecting known-breached passwords addresses it directly. |
-| Maximum length | High, but bounded, so hashing cost cannot be weaponized |
-| Feedback | v0.3 board 07 shows a strength meter — that is **copy**, not policy. Policy is server-side. |
+| Minimum length | **12 characters** |
+| Maximum length | **128**, as a validation error — never a silent trim |
+| Composition requirements | **None** |
+| Breach-list checking | **On**, via Pwned Passwords k-anonymity |
+| Confirmation | Required on register, reset and change |
+| Hashing | **argon2id**, 64 MiB / 4 passes / 1 thread |
+
+Length is the property that resists guessing; mandatory character classes mostly
+produce `Purrenade1!`. Twelve rather than eight because a public leaderboard
+gives every account a reason to be attacked and player 2FA is optional.
+
+The maximum exists because hashing cost is otherwise attacker-controlled — a
+one-megabyte password is a denial-of-service request. It is a **refusal**, not a
+truncation: a password quietly shortened to fit is one the player cannot
+reproduce. That is also why the hasher is argon2id and not bcrypt, which ignores
+everything past 72 bytes.
+
+The breach check is its own validation rule rather than `Password::uncompromised()`,
+because Laravel's `Password` rule aggregates every check into one failed-rule
+name — a client would then receive the same code for "too short" and for "this
+password has been published", two problems needing opposite advice.
+
+v0.3 board 07's strength meter is **copy, not policy**, as this section always
+said. It never blocks a submit, and it cannot: the server checks things no client
+heuristic can know, the breach corpus above being the obvious one.
 
 ---
 
@@ -53,9 +71,11 @@ Nothing in the references specifies one. What must be decided:
 | --- | --- |
 | Codes are **hashed at rest** | APPROVED |
 | Single-use, consumed on success | APPROVED |
-| Attempt-limited per code, then invalidated | PROPOSED |
-| TTL | **OPEN (SEC-2)** |
-| Resend cooldown — v0.3 displays 0:42 | **OPEN (SEC-2)** |
+| Attempt-limited per code, then invalidated | **IMPLEMENTED — 5 attempts** |
+| TTL | **IMPLEMENTED — 10 minutes** (SEC-2 resolved at M2) |
+| Resend cooldown — v0.3 displays 0:42 | **IMPLEMENTED — 42 seconds** (SEC-2) |
+| Issuing a new code invalidates the previous one | **IMPLEMENTED** — without it, every resend would *widen* an attacker's window rather than refreshing it |
+| A code cannot verify another account | **IMPLEMENTED, structurally** — the endpoint is authenticated and the code is looked up by the caller's own id |
 | Resend is rate-limited per address **and** per source | APPROVED |
 | The code is dispatched by a **queued job after commit** | APPROVED |
 
@@ -73,7 +93,7 @@ three are not optional details.
 | --- | --- |
 | Tokens are hashed at rest, single-use, time-limited | APPROVED |
 | The `forgot` response is **identical whether or not the address exists** | APPROVED — enumeration resistance |
-| A successful reset **revokes all existing sessions** | PROPOSED — a reset usually means a suspected compromise |
+| A successful reset **revokes all existing sessions** | **IMPLEMENTED** — including any the caller holds. A reset normally answers a suspected compromise, so the point is to evict whoever else is signed in, which has to include sessions the request cannot identify. |
 | **Reset never disables, resets, or bypasses 2FA** | **APPROVED — a security invariant.** See §4.1 |
 
 ### 4.1 Password reset never touches 2FA — APPROVED INVARIANT
@@ -94,10 +114,44 @@ step, and the second factor would provide no protection against precisely the at
 to stop. A player who has lost their authenticator must go through 2FA recovery — deliberately,
 and on its own terms.
 
-**Tested, not asserted.** This is a named regression gate (`S8`), verified by a test that
-completes a reset and then asserts that enrolment, secret and recovery codes are unchanged and
-that the next login is still challenged. See
-[`../testing/regression-gates.md`](../testing/regression-gates.md).
+**Tested, not asserted.** Regression gate `S8`, **implemented at M2** as five separate
+tests in `tests/Feature/Auth/PasswordResetTest.php` — one per property, so a partial
+regression cannot hide behind a passing neighbour: enrolment still enabled, secret
+unchanged, no recovery code consumed or regenerated, the next login still challenged, and
+no challenge pre-marked as satisfied. Also exercised end to end in the manual acceptance
+pass. See [`../testing/regression-gates.md`](../testing/regression-gates.md).
+
+Mechanically, the reset callback writes **exactly two columns** — `password` and
+`remember_token`. Nothing two-factor is named in it, so the invariant cannot be broken by
+editing a value, only by adding a field.
+
+---
+
+## 4.2 What each password path invalidates — APPROVED (M2 audit)
+
+Stated as one table, because "the reset revokes sessions" turned out not to be
+the whole answer.
+
+| | Authenticated change (`PUT /auth/password`) | Reset by link (`POST /auth/password/reset`) |
+| --- | --- | --- |
+| Requires `current_password` | yes | no — the emailed token is the proof |
+| The caller's own session | **kept** | **revoked** |
+| Every other session | **revoked** | **revoked** |
+| Pending two-factor challenges | **purged** | **purged** |
+| Two-factor enrolment, secret, recovery codes | untouched | untouched (§4.1) |
+| `remember_token` | untouched | rotated |
+
+The asymmetry on the caller's own session is the point. A deliberate change by
+someone who can already prove the old password is not the same event as a reset:
+signing them out of the screen they just used is friction with no security value.
+A reset is normally a response to suspected compromise, so it evicts everyone
+including sessions this request cannot identify.
+
+**The purge is the part that was missing.** Revoking tokens left a pending
+`two_factor_challenges` row behind — a half-authenticated handle opened on the
+strength of the *old* password, redeemable for the rest of its five minutes, and
+redeeming it minted a full session after every existing one had been destroyed.
+Both paths now purge. Covered by the `S9` tests.
 
 ---
 
@@ -138,8 +192,9 @@ authorization decision.
 | Revocation is **immediate**, per session and globally | APPROVED |
 | Sessions record device label, approximate location, last-seen | APPROVED (v0.3 board 20) |
 | Device label and location are **personal data** and fall under retention policy | APPROVED |
-| Session lifetime, idle timeout, absolute timeout | **OPEN** (ADR-0005 q3) |
-| Does revoke-all include the current session? | **OPEN (AUTH-2)** |
+| Session lifetime, idle timeout, absolute timeout | **IMPLEMENTED** — idle 7 days at the BFF, absolute 30 days at both layers |
+| Does revoke-all include the current session? | **RESOLVED (AUTH-2): no.** `DELETE /auth/sessions` keeps the caller's own session. The action is "get everyone else out", and `POST /auth/logout` already exists for the other intent — ending the caller's session here would make every use of the control finish at the login screen. |
+| A session **is** a Sanctum token row | **IMPLEMENTED** — so revocation deletes the credential itself rather than asking a browser to forget a cookie |
 
 ---
 
@@ -148,9 +203,15 @@ authorization decision.
 Every authentication endpoint is rate-limited per identifier **and** per source.
 See [rate-limiting.md](rate-limiting.md).
 
-**OPEN (AUTH-3):** lockout policy. The tension is real — a hard lockout on failed
-attempts converts credential stuffing into a denial-of-service against the
-targeted account. Progressive delay is usually preferable to lockout.
+**RESOLVED (AUTH-3) at M2: progressive throttling, no lockout, ever.** A hard lockout on
+failed attempts converts credential stuffing into a reliable denial-of-service against any
+account whose address an attacker knows — it makes the attack *easier*. There is no lockout
+state anywhere in this system.
+
+Every limiter is two-dimensional (per identifier **and** per source, both of which must be
+satisfied), because per-account alone misses one host attacking a thousand accounts and
+per-IP alone misses a botnet attacking one. Concrete values are in
+[rate-limiting.md](rate-limiting.md) §2 and in `App\Support\RateLimits`.
 
 ---
 
@@ -170,10 +231,11 @@ targeted account. Progressive delay is usually preferable to lockout.
 
 | Ref | Question |
 | --- | --- |
-| ADR-0005 | *(Direction Accepted.)* Remaining at M2: Sanctum mode upstream, session store, timeouts, CSRF pattern |
-| SEC-1 | Password policy, including breach-list checking |
-| SEC-2 | Code and token TTLs; resend cooldown |
-| AUTH-1 | What an unverified player may access |
-| AUTH-2 | Does revoke-all include the current session? |
-| AUTH-3 | Lockout policy |
+| ~~ADR-0005~~ | **All ten M2 questions resolved.** See `../architecture/auth-architecture.md`. |
+| ~~SEC-1~~ | **Resolved at M2.** §2. |
+| ~~SEC-2~~ | **Resolved at M2.** §3, and rate-limiting.md §2. |
+| ~~AUTH-1~~ | **Resolved at M2:** four endpoints. See `authorization-and-roles.md` §7. |
+| ~~AUTH-2~~ | **Resolved at M2:** revoke-all keeps the current session. §6. |
+| ~~AUTH-3~~ | **Resolved at M2:** progressive throttling, no lockout. §7. |
+| AUTH-4 | Device labelling **resolved**; location and its retention remain OPEN. `../architecture/auth-architecture.md` §8. |
 | AUTH-4 | Device labelling and location derivation |

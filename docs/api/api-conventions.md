@@ -21,12 +21,12 @@ retrofitted.
 
 ---
 
-## 2. Format — PROPOSED
+## 2. Format — APPROVED (API-2 resolved at M2)
 
 | Concern | Rule |
 | --- | --- |
 | Content type | `application/json` for requests and successful responses |
-| Field naming | **`snake_case`**, consistently. The frontend maps at its boundary; mixing conventions inside one API is worse than either choice. |
+| Field naming | **`snake_case`**, consistently — **decided (API-2)**. The frontend maps at its boundary; mixing conventions inside one API is worse than either choice. |
 | Dates and times | **ISO 8601, UTC, with an explicit offset** |
 | Durations | Integer **milliseconds**, suffixed `_ms` |
 | Money | Does not exist in this product |
@@ -37,39 +37,74 @@ retrofitted.
 
 ---
 
-## 3. Error envelope — PROPOSED
+## 3. Error envelope — APPROVED, IMPLEMENTED (API-1 resolved at M2)
 
-**One envelope for every error response.** The client maps from `code`, never
-from `message`.
+**RFC 9457 Problem Details**, served as `application/problem+json`, for **every**
+error response. One shape, no exceptions.
+
+"Every" means every path on the host, not every declared route. The renderer was
+originally scoped to `api/*` and `/`, so anything else — a typo, a probe, a route
+the framework had registered — fell through to the framework's default handler and
+answered with `{"exception", "file", "line", "trace"}`. The scope condition is
+gone (M2 audit), and so are the two routes nobody had declared.
 
 ```json
 {
-  "error": {
-    "code": "validation_failed",
-    "message": "The given data was invalid.",
-    "correlation_id": "01J9Z...",
-    "details": {
-      "email": [{ "code": "email_taken", "message": "This email is already registered." }]
-    }
+  "type": "urn:purrenade:error:validation_failed",
+  "title": "Validation failed",
+  "status": 422,
+  "detail": "The given data was invalid.",
+  "instance": "/api/v1/auth/register",
+  "code": "validation_failed",
+  "correlation_id": "01K5R8Q2M3N4P5Q6R7S8T9V0W1",
+  "errors": {
+    "email": [{ "code": "taken", "message": "This email is already registered." }]
   }
 }
 ```
 
+### Why RFC 9457 rather than the bespoke envelope
+
+The envelope this section previously proposed was simpler to write and offered
+nothing the standard does not. RFC 9457 is what HTTP tooling, client generators
+and proxies already understand, and the requirement it has to satisfy is that a
+client needs **one** parser for the whole surface — which a standard shape
+delivers by construction.
+
+### Members
+
 | Field | Rule |
 | --- | --- |
-| `code` | **Stable, machine-readable, never localized.** Adding a code is additive; changing one is breaking. |
-| `message` | Human-readable, **localized to the request locale**. For display and logs only — never for logic. |
-| `correlation_id` | Always present. The player can quote it; the frontend surfaces it on unexpected failures. |
-| `details` | Field-level errors, each with its own stable `code` |
+| `type` | A **URN**: `urn:purrenade:error:{code}`. RFC 9457 does not require the type to be dereferenceable, and no published documentation site exists — inventing an `https://` URL that 404s would be worse than being honest. |
+| `title` | Short, stable, **English**, describing the problem *type* rather than this occurrence. Not localised. |
+| `status` | The HTTP status, repeated in the body as the RFC specifies. |
+| `detail` | Human-readable, about **this** occurrence. For display and logs only — **never branch on it**. |
+| `instance` | The path that produced the problem. |
+| **`code`** | **Extension.** The value clients branch on: stable, machine-readable, never localised. Always the tail of `type`, so the two cannot disagree. Adding a code is additive; changing one is breaking. |
+| **`correlation_id`** | **Extension.** Always present, and echoed in the `X-Correlation-Id` header. The player can quote it. |
+| **`errors`** | **Extension.** Field name → list of `{code, message}`. The per-field code is what lets a client render "already taken" in Turkish without parsing English. |
+| **`retry_after`** | **Extension**, on `429`. Seconds. Also sent as a `Retry-After` header — the header is what proxies and HTTP libraries honour, the member is what a countdown in the UI needs. |
+
+### Two rules that follow
+
+**`status` is a top-level member wherever a response has one**, never nested
+inside `meta`. On `POST /auth/login` it decides the response *shape*, and an
+OpenAPI discriminator cannot read a property inside another object — so it sits
+at the top of every envelope that has one, consistently rather than only where a
+union needs it.
 
 **Never included:** stack traces, SQL, internal class names, file paths,
-dependency versions.
+dependency versions. That holds with `APP_DEBUG=true` as well: a response shape
+that changes between environments is one nobody can test against.
 
-**OPEN (API-1):** whether to adopt RFC 9457 `application/problem+json` instead.
-It is the standard and interoperates well; the envelope above is simpler for a
-single first-party client. Decide once, before the first endpoint exists.
+The one documented exception to "every error is problem+json" is the readiness
+probe's `503`, which carries the same `HealthReport` schema as its `200`. That is
+deliberate — a monitor branches on `status`, and a body that changed shape at the
+moment the service degraded would be a body the monitor could not parse. It is a
+status report in a degraded state, not an error description. A CI gate enforces
+the rule and names that exemption.
 
-### 3.1 Status codes — PROPOSED
+### 3.1 Status codes — APPROVED, IMPLEMENTED
 
 | Code | Used for |
 | --- | --- |
@@ -101,6 +136,15 @@ server-managed session cookies** for the browser, over a **token-capable** API.
 | --- | --- |
 | **Browser** | Talks to the **Nuxt BFF**, which holds the session and attaches the upstream credential. The browser itself carries only an `HttpOnly` session cookie set by the BFF, and **never** a bearer token. |
 | **Future native client** | Authenticates **directly against this API** with a bearer credential, **bypassing the BFF**. Not implemented in v1. |
+
+**Implemented at M2:** one scheme, `sessionToken` — a Sanctum personal access
+token presented as `Authorization: Bearer`. This API accepts **no cookie at all**;
+Sanctum's stateful-domain list is empty on purpose, which is what keeps it
+origin-agnostic and makes the native path the same path rather than a parallel
+one. Every token carries a `session` ability; only a token minted by the
+two-factor challenge also carries `two-factor`, which is how admin-scoped routes
+distinguish "this account has 2FA" from "this session proved it". See
+`../architecture/auth-architecture.md`.
 
 Two rules follow for every endpoint in this contract:
 
@@ -197,8 +241,8 @@ in logs, in queued jobs, and in the audit log. See
 
 | Ref | Question |
 | --- | --- |
-| API-1 | RFC 9457 `problem+json` or the envelope in §3? |
-| API-2 | `snake_case` confirmation (§2) |
+| ~~API-1~~ | **Resolved at M2: RFC 9457 `problem+json`.** See §3. |
+| ~~API-2~~ | **Resolved at M2: `snake_case`.** See §2. |
 | API-3 | Idempotency key retention window |
 | API-4 | Default and maximum pagination limits |
 | API-5 | Is idempotency generalized beyond run submission? |

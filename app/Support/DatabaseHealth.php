@@ -19,9 +19,19 @@ use Throwable;
  */
 final readonly class DatabaseHealth
 {
+    /**
+     * @param  string|null  $connection  Which connection readiness means. Null is the
+     *                                   default connection, which is the answer for a
+     *                                   service with one database. Named explicitly so
+     *                                   a deployment with a replica can probe the one
+     *                                   that actually matters — and so a test can point
+     *                                   it at an unreachable server without disturbing
+     *                                   the connection its own transaction runs on.
+     */
     public function __construct(
         private DatabaseManager $database,
         private LoggerInterface $logger,
+        private ?string $connection = null,
     ) {}
 
     /**
@@ -39,7 +49,7 @@ final readonly class DatabaseHealth
     public function isReachable(): bool
     {
         try {
-            $this->database->connection()->select('select 1');
+            $this->database->connection($this->connection)->select('select 1');
 
             return true;
         } catch (Throwable $e) {

@@ -1,6 +1,6 @@
 # ADR-0005 — Authentication and 2FA strategy
 
-- **Status:** **Accepted** (direction). Implementation details re-researched at M2.
+- **Status:** **Accepted and IMPLEMENTED (M2).** All ten open parameters resolved — see the final section.
 - **Scope:** Product-wide
 - **Date:** 2026-09-12
 - **Decision owner:** Product owner + backend
@@ -47,7 +47,13 @@ This makes ADR-0005 and the Nuxt rendering/BFF question **one decision, not two*
 | 2FA scope | TOTP only out of the box; no WebAuthn/passkeys without additional packages |
 | Versions at verification | `laravel/fortify` 1.39.0, `laravel/sanctum` 4.3.3, `laravel/passport` 13.8.0 |
 
-**Re-research this section before implementation begins at M2.** These findings are dated.
+**Re-researched at M2 (2026-09-12) and confirmed.** `laravel/fortify` **1.39.0** and
+`laravel/sanctum` **4.3.3** are the current stable releases and both declare
+`illuminate/support ^11.0|^12.0|^13.0`, so both install against Laravel 13.31 with no
+downgrade to Laravel, PHP, Pest or PHPUnit. Fortify 1.39 pulls in `laravel/passkeys`
+^0.2.0 as a dependency; passkeys stay out of scope and that package's routes are disabled
+alongside Fortify's. Passport was re-confirmed as unnecessary — see the rejected
+alternatives.
 
 ---
 
@@ -207,17 +213,78 @@ and adds a large surface to secure.
 
 ---
 
-## Decided at M2, after re-research
+## Decided at M2 — RESOLVED
 
-| # | Question |
-| --- | --- |
-| 1 | Which Sanctum mode the BFF uses upstream, and the exact Fortify configuration |
-| 2 | Session store, idle timeout, absolute timeout, rotation triggers |
-| 3 | CSRF pattern: double-submit or synchroniser |
-| 4 | 2FA challenge point: at login, or step-up before sensitive actions |
-| 5 | Where mandatory-admin-2FA is enforced so **no admin route can bypass it** |
-| 6 | Recovery-code count, storage, single-use semantics, regeneration |
-| 7 | Session/device model: device identification, location derivation, revocation semantics |
-| 8 | Password policy — length, composition, breach-list checking (SEC-1) |
-| 9 | Email verification code TTL, resend cooldown (v0.3 shows 0:42), rate limits |
-| 10 | Lockout and throttling policy on repeated failures |
+All ten questions were answered during M2 implementation. The mechanism is
+documented in [`../architecture/auth-architecture.md`](../architecture/auth-architecture.md)
+(API side) and `purrenade/docs/architecture/bff-and-session.md` (browser side).
+
+| # | Question | Decision |
+| --- | --- | --- |
+| 1 | Sanctum mode upstream, and the Fortify configuration | **Token mode only.** `stateful` and `guard` are both empty, `routes` is off — this API accepts no cookie, which is what keeps it origin-agnostic and makes the native path the same path. Fortify supplies the *machinery* (TOTP provider, recovery-code format, encrypted-secret semantics, password rules); its route layer is disabled, because it is session-based and redirect-oriented and a native client has neither. |
+| 2 | Session store, idle timeout, absolute timeout, rotation triggers | **Idle 7 days, enforced at the BFF** (the only layer that sees browser activity). **Absolute 30 days, enforced at both** — `sanctum.expiration` is the backstop. Store: Nitro storage, filesystem locally, a shared store in production (**OPS-1**). Rotation on login, on a passed challenge and on a password change, guaranteed structurally because `startSession()` always mints a new identifier and is the only writer. |
+| 3 | CSRF pattern | **Synchroniser token at the BFF.** Not double-submit: that compares a header to a cookie and trusts that only our own page set the cookie, which fails if any subdomain can write cookies for the parent domain. A real session store makes the stronger pattern free. Plus an origin check and `SameSite=Lax` as defence in depth. |
+| 4 | 2FA challenge point | **At login**, one challenge per session. Step-up rejected for v1: it needs a definition of "sensitive" that would drift, and the risk it addresses is covered by requiring `current_password` on every sensitive action — which is stateless and identical for browser and native callers. |
+| 5 | Where mandatory admin 2FA is enforced so no route can bypass it | **On the admin route group**, checking four conditions: role, verified address, enrolled second factor, and **a session that actually passed a challenge**. The fourth is carried by a token *ability* welded on at issue time, which no endpoint can add later. A test enumerates the registered routes and asserts the middleware is present on every one, so a route added later inherits it or the build fails. |
+| 6 | Recovery-code count, storage, single-use semantics, regeneration | **8 codes.** One row per code, hashed with a keyed HMAC — not Fortify's encrypted JSON array, which is reversible and enforces single use only in application code. Consumption is one atomic conditional `UPDATE`, so two concurrent requests cannot spend the same code. Regeneration requires `current_password` and invalidates the whole previous set. |
+| 7 | Session/device model | **One Sanctum token row *is* one session.** Device label derived server-side from the User-Agent into a closed set of short strings; the raw header is never stored. Clients address an opaque `public_id` (UUID), never the primary key. **No IP and no location** — AUTH-4 stays OPEN, and storing the address before the retention decision would create the obligation early. Revocation deletes the row, so it destroys the credential rather than asking a browser to forget a cookie. |
+| 8 | Password policy (SEC-1) | **12–128 characters, no composition rules, breach-checked** via Pwned Passwords k-anonymity. Hashed with **argon2id** — memory-hard as required, and with no silent truncation, which bcrypt would inflict at 72 bytes on a 128-character policy. The maximum is a refusal, never a trim. |
+| 9 | Verification code TTL, resend cooldown, rate limits | **10-minute TTL, 5 attempts per code, 42-second cooldown** (the number v0.3 renders), resend 5/hour per account and 15/hour per source. Issuing a new code invalidates the previous one, so a resend refreshes the attacker's window rather than widening it. The cooldown answers `429` with `retry_after`, so the client renders the countdown the design specifies instead of guessing. |
+| 10 | Lockout and throttling on repeated failures | **Progressive throttling, no lockout, ever.** A hard lockout converts credential stuffing into a reliable denial-of-service against any account whose address is known — it makes the attack easier. Every limiter is two-dimensional, per identifier **and** per source. |
+
+### One thing the implementation added
+
+**The browser never receives the two-factor challenge token either.** ADR-0005 §1
+said the *API credential* must not reach the browser; implementing the challenge
+made it clear the same reasoning applies to the intermediate token, which proves
+the first factor is already satisfied. It lives in the BFF session alongside the
+API token, and the browser learns only that a code is owed.
+
+---
+
+## Amended after the M2 adversarial audit — RESOLVED
+
+Three of this ADR's own guarantees turned out not to hold as written. Recorded
+here rather than only in the implementation notes, because each one changes what
+the decision means.
+
+### The `two-factor` ability is not sufficient on its own
+
+§1 treats "this session passed a challenge" as a property that can be welded to a
+credential at issue time. It can — but a Sanctum ability cannot be *withdrawn*
+from a token that already exists, so the property outlives the secret it
+attested to. Disable 2FA, enrol a new secret, confirm it, and a session
+challenged against the old secret is privileged again: every account-level check
+is individually true, and only their conjunction is false.
+
+**Amendment:** the account carries a generation counter, advanced by every
+material change to the second factor, and a token records the generation it was
+challenged against. Satisfaction means the ability **and** a matching generation.
+Rotating an authenticator — the standard response to losing one — now actually
+evicts sessions that predate the rotation, and the four transitions revoke every
+other session besides.
+
+### Revoking sessions is not the whole eviction
+
+§1 and §3 speak of a password reset ending every session. Sessions are token
+rows, and revoking them left a pending two-factor challenge — a
+half-authenticated handle opened on the strength of the *old* password —
+redeemable for the rest of its five minutes, minting a full session after every
+existing one had been destroyed.
+
+**Amendment:** both password paths purge pending challenges. Session eviction
+means every artefact that can still be exchanged for a session, not only the
+table named `personal_access_tokens`.
+
+### The session store is a build-time choice, not a runtime one
+
+§3 requires a server-side record so revocation is real, and the BFF's notes said
+moving that store in production was "a configuration change, not a code change".
+It is not: `nitro.storage` is resolved when the server is built,
+so the environment variable has no effect at runtime and a production deployment
+would silently keep writing plaintext bearer tokens to local disk.
+
+**Amendment:** the driver is documented as build-time, and the BFF refuses to
+start a production process whose resolved session store is filesystem-backed
+unless the operator has explicitly acknowledged it. OPS-1 remains OPEN; what is
+now closed is the possibility of getting the unsafe answer by accident.

@@ -56,6 +56,9 @@ jobs:
       - name: Create the throwaway test role and database
         run: |
           set -euo pipefail
+          # The role gets no CREATEDB, matching local development: the test
+          # suite isolates itself in a schema it can create inside its own
+          # database, not in a second database.
           sudo -u postgres psql -v ON_ERROR_STOP=1 <<'SQL'
           CREATE ROLE purrenade LOGIN PASSWORD 'ci-only-not-a-secret';
           CREATE DATABASE purrenade OWNER purrenade;
@@ -87,6 +90,43 @@ jobs:
         env:
           DB_PASSWORD: ci-only-not-a-secret
 
+      - name: Migrations run from an empty database
+        run: |
+          set -euo pipefail
+          # `migrate` above proved the incremental path. This proves a fresh
+          # install, which is what a new environment actually does — and it runs
+          # in the test schema, so it cannot disturb the data the suite created.
+          DB_SEARCH_PATH=purrenade_test php artisan migrate:fresh --force
+        env:
+          DB_PASSWORD: ci-only-not-a-secret
+
+      - name: Configuration and routes survive caching
+        run: |
+          set -euo pipefail
+          # Both caches change how the application resolves values, and both
+          # fail only in production if they fail at all: `config:cache` stops
+          # .env being read, and `route:cache` cannot serialise a closure route.
+          php artisan config:cache
+          php artisan route:cache
+          php artisan route:list --json > /dev/null
+          php artisan config:clear
+          php artisan route:clear
+          echo "config and route caches build and clear cleanly"
+        env:
+          DB_PASSWORD: ci-only-not-a-secret
+
+      - name: Authentication secrets are never logged
+        run: |
+          set -euo pipefail
+          # App\Support\AuthLog is the only writer to the security channel, and
+          # it accepts no credential by design. This checks the property from the
+          # other direction: no call site anywhere passes one.
+          if grep -rnE "AuthLog::[a-zA-Z]+\(.*(\\$password|\\$code|\\$token|\\$secret|recovery_code|current_password)" app/; then
+            echo "ERROR: a credential is being passed to the security log."
+            exit 1
+          fi
+          echo "no credential reaches the security log"
+
       - name: Record the PostgreSQL version gap
         run: |
           echo "CI PostgreSQL : ${{ steps.pg.outputs.server_version }}"
@@ -106,24 +146,119 @@ jobs:
       - name: Every route must exist in the contract
         run: |
           set -euo pipefail
-          # An undocumented endpoint is invisible to the only mechanism keeping
-          # the two repositories in step.
+          # Driven by the real route table, not by reading route files.
+          #
+          # The file-scanning version could only see routes this repository
+          # writes down, so it was blind to every route the framework or a
+          # package registers. It missed three: Laravel's `/up` health route,
+          # which served HTML from a JSON-only service, and the GET and PUT
+          # `storage/{path}` pair that `filesystems.local.serve` turns on. An
+          # undocumented endpoint is invisible to the only mechanism keeping the
+          # two repositories in step, and one nobody declared is worse.
+          php artisan route:list --json > /tmp/routes.json
+          python3 - <<'EOF'
+          import json, re, sys
+
+          spec = open('docs/api/openapi.draft.yaml', encoding='utf-8').read()
+          routes = json.load(open('/tmp/routes.json', encoding='utf-8'))
+
+          missing = []
+          for route in routes:
+              uri = '/' + route['uri'].lstrip('/')
+              # The contract is written without the /api/v1 mount prefix.
+              path = re.sub(r'^/api/v1', '', uri) or '/'
+              if re.search(r'^\s{2}' + re.escape(path) + r':\s*$', spec, re.M) is None:
+                  missing.append(f"{route['method']} {uri}")
+
+          if missing:
+              print('ERROR: routes not present in openapi.draft.yaml:')
+              for entry in missing:
+                  print('  ', entry)
+              sys.exit(1)
+
+          print(f'all {len(routes)} registered route(s) present in the contract')
+          EOF
+
+      - name: The error envelope holds on the live application
+        run: |
+          set -euo pipefail
+          # The gate below lints the contract document. This one asks the
+          # running application, because the two can disagree — and did.
+          #
+          # The renderer was scoped to `api/*`, so every other path on the host
+          # fell through to Laravel's default handler and answered with
+          # `{"exception", "file", "line", "trace"}`: a stack trace and absolute
+          # filesystem paths. A document gate cannot see that, because the paths
+          # it happens on are not in the document.
+          php artisan serve --host=127.0.0.1 --port=8411 &
+          SERVER=$!
+          trap 'kill $SERVER 2>/dev/null || true' EXIT
+          for _ in $(seq 1 40); do
+            curl -sf http://127.0.0.1:8411/api/v1/health >/dev/null 2>&1 && break
+            sleep 0.25
+          done
+
+          failed=0
+          for path in /does-not-exist /up /storage/anything /admin /api/v1/does-not-exist /api/v1/auth/me; do
+            for accept in 'application/json' 'text/html' '*/*'; do
+              body=$(curl -s -H "Accept: $accept" "http://127.0.0.1:8411$path")
+              ctype=$(curl -s -o /dev/null -w '%{content_type}' -H "Accept: $accept" "http://127.0.0.1:8411$path")
+
+              case "$ctype" in
+                application/problem+json*) ;;
+                *) echo "ERROR: $path (Accept: $accept) answered $ctype, not application/problem+json"; failed=1 ;;
+              esac
+
+              if printf '%s' "$body" | grep -qE '"(exception|file|line|trace)"'; then
+                echo "ERROR: $path (Accept: $accept) leaked framework internals"
+                failed=1
+              fi
+            done
+          done
+
+          [ "$failed" -eq 0 ] || exit 1
+          echo 'every path on the host answers with one envelope and no internals'
+
+      - name: One error envelope, no exceptions
+        run: |
+          set -euo pipefail
+          # API-1: RFC 9457 for every error. A second envelope shape is how a
+          # client ends up needing per-endpoint parsing, which is the thing the
+          # decision exists to prevent.
           python3 - <<'EOF'
           import re, sys
-          # Every file that can declare a route. routes/root.php holds the one
-          # endpoint above the /api prefix; missing it here would let the web
-          # root drift out of the contract unnoticed.
-          routes = ''.join(
-              open(f, encoding='utf-8').read()
-              for f in ('routes/api.php', 'routes/root.php')
-          )
+
           spec = open('docs/api/openapi.draft.yaml', encoding='utf-8').read()
-          declared = set(re.findall(r"Route::(?:get|post|put|patch|delete)\(\s*'([^']+)'", routes))
-          missing = [r for r in declared if re.search(r'^\s{2}' + re.escape(r) + r':\s*$', spec, re.M) is None]
-          if missing:
-              print('ERROR: routes not present in openapi.draft.yaml:', missing)
+
+          # Every declared 4xx/5xx response body must be problem+json, with one
+          # stated exception: the readiness probe's 503 carries a HealthReport,
+          # the same schema as its 200. That is deliberate — a monitor branches
+          # on `status`, and a body that changed shape when the service degraded
+          # would be a body the monitor could not parse at the moment it matters.
+          # It is a status report in a degraded state, not an error description.
+          EXEMPT = {'HealthReport'}
+
+          problems = []
+          for match in re.finditer(r"^(\s+)'([45]\d\d)':\n((?:\1 .*\n|\s*\n)*)", spec, re.M):
+              block = match.group(3)
+              if '$ref:' in block and 'components/responses' in block:
+                  continue            # a shared response, itself problem+json
+              if any(name in block for name in EXEMPT):
+                  continue
+              if 'application/json' in block and 'application/problem+json' not in block:
+                  problems.append(f"{match.group(2)} at line {spec[:match.start()].count(chr(10)) + 1}")
+
+          if problems:
+              print('ERROR: error responses not served as application/problem+json:')
+              for entry in problems:
+                  print('  ', entry)
               sys.exit(1)
-          print(f'all {len(declared)} declared route(s) present in the contract')
+
+          if 'ErrorResponse' in spec:
+              print('ERROR: the superseded ErrorResponse envelope is still referenced.')
+              sys.exit(1)
+
+          print('every declared error response uses application/problem+json')
           EOF
 
   docs:

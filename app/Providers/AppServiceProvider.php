@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Providers;
 
+use App\Support\EnvironmentGuard;
 use Illuminate\Http\Middleware\TrustProxies;
 use Illuminate\Http\Request;
 use Illuminate\Support\ServiceProvider;
@@ -23,6 +24,10 @@ class AppServiceProvider extends ServiceProvider
      */
     public function boot(): void
     {
+        // Before anything else: a production deployment must not run on a
+        // development default. See the guard for why a warning would not do.
+        EnvironmentGuard::enforce((string) config('app.env'));
+
         $this->configureTrustedProxies();
     }
 

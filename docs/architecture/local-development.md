@@ -97,6 +97,107 @@ Two deliberate constraints:
 Production defines its own proxy topology through the same variable; nothing here assumes it
 terminates TLS the same way.
 
+## Mail, locally
+
+Authentication sends two things: the six-digit verification code and the
+password-reset link. Both are **queued notifications dispatched after commit** —
+a code for a row a rollback removes is worse than a slightly later mail.
+
+`QUEUE_CONNECTION=sync` locally, so they run inline and there is **no worker to
+start**. The jobs are still queue-shaped, which is the APPROVED contract
+(`docs/security/authentication.md` §3); production flips one environment variable
+and runs a worker, with no code change.
+
+> **`QUEUE_CONNECTION=database` without a running worker is a silent failure.**
+> Registration succeeds, the code is written to the `jobs` table, and the player
+> waits for a mail that will never arrive. The test suite does not catch it —
+> `phpunit.xml` sets `sync` — so it only shows up in a real browser. It is
+> called out in `.env.example` for that reason.
+
+`MAIL_MAILER=log`, so mail is written to `storage/logs/laravel.log` rather than
+sent. No SMTP server, no Docker, and **M2 depends on no purchased provider**.
+
+### Reading a verification code
+
+```bash
+# The plain-text part of the mail renders the code on a line of its own.
+# `tr -d '\r'` matters: a MIME message uses CRLF, so an anchored `$` will not
+# match a line that ends "123456\r".
+tail -200 storage/logs/laravel.log | tr -d '\r' | grep -aoE '^[0-9]{6}$' | tail -1
+```
+
+### Reading a password-reset link
+
+```bash
+# Quoted-printable wraps long lines with a trailing `=`; unfold before matching.
+tail -200 storage/logs/laravel.log | tr -d '\r' \
+  | sed ':a;/=$/{N;s/=\n//;ba}' \
+  | grep -aoE 'https://purrenade\.test/auth/reset-password\?[^ "<]*' | tail -1
+```
+
+Do not truncate the log while the service is running: it holds the file open, and
+truncating leaves it NUL-padded up to the writer's offset, after which `grep`
+treats it as binary. Record a byte offset and read forward instead.
+
+## Security events
+
+Authentication events go to a channel of their own,
+`storage/logs/security-*.log`, written through `App\Support\AuthLog` and nothing
+else. Separate from the application log because retention and alerting differ —
+and because one writer means the field set is fixed and no credential can reach
+it.
+
+```bash
+tail -f storage/logs/security-$(date +%Y-%m-%d).log
+```
+
+Logged: logins (success, failure, throttled), registration, verification,
+password reset and change, every two-factor transition, recovery-code use,
+session revocation, and admin access granted or denied with the reason.
+
+**Never logged:** passwords, TOTP secrets, recovery codes, verification codes,
+reset tokens, session cookies, bearer tokens, `APP_KEY`, database credentials. A
+CI gate greps for a credential being passed to `AuthLog`.
+
+## Tests run in their own schema
+
+The suite runs in the `purrenade_test` **schema**, inside the same dedicated
+`purrenade` database (`DB_SEARCH_PATH` in `phpunit.xml`). `RefreshDatabase` drops
+and rebuilds everything in the search path, so sharing `public` with local
+development would destroy the developer's data on every run — including the
+account used for manual acceptance.
+
+A schema rather than a second database because the application role owns its
+database and may create schemas in it, but deliberately has **no `CREATEDB`
+privilege**. So the isolation needs no superuser and no sudo:
+`tests/TestCase.php` creates the schema if it is missing, and a new developer has
+nothing to set up.
+
+```bash
+php artisan test                                        # the suite, in its own schema
+DB_SEARCH_PATH=purrenade_test php artisan migrate:fresh # rebuild just the test schema
+php artisan migrate                                     # the dev schema, incrementally
+```
+
+Argon2id cost is lowered in `phpunit.xml` only. `config/hashing.php` keeps the
+real values, and no test asserts anything about the cost.
+
+## Creating an administrator locally
+
+There is no self-service route to the admin role, deliberately. Promote an
+existing, **verified** account:
+
+```bash
+php artisan tinker --execute="\App\Models\User::where('email','you@example.test')->update(['role'=>'admin']);"
+```
+
+The admin surface then stays refused until all four conditions hold — role,
+verified address, enrolled second factor, and a session that actually passed a
+challenge. Each refusal carries its own code, so the response says which gate
+stopped you. Enrol through the account-security screen and sign in again; the
+`two-factor` ability is attached when the session is minted and no endpoint adds
+it later.
+
 ## The two endpoints this service answers today
 
 Both are operational, not product surface. Both are in `docs/api/openapi.draft.yaml`, because
@@ -145,7 +246,8 @@ above the `/api` prefix, and this application has no `web` middleware group for 
 PostgreSQL, so it really connects: `select 1` on the default connection. When that fails the
 endpoint answers **503** with `status: "degraded"` and `checks.database: "error"` — 503 rather
 than 500, because it is what tells a load balancer to take the instance out of rotation instead
-of paging a human. Laravel's own `/up` remains the liveness probe.
+of paging a human. It is the only health endpoint: Laravel's `/up` was removed at
+the M2 audit for serving HTML from a JSON-only service (observability.md §7).
 
 **The reason for a failure is logged, never returned.** A driver message carries the host, port,
 database name and role; the caller gets `"error"` and nothing else.

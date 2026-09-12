@@ -67,6 +67,7 @@ depends on every developer remembering it is not a rule.
 | Achievement progression derived from telemetry | Rate and distribution shifts are an early tampering signal |
 | Idempotent replay hits | A sudden rise means a client bug or an attack |
 | Rate-limit triggers | |
+| `breach_check_unavailable` | The compromised-password provider could not be reached, so a password was accepted without the check. Fail-open is the policy; an outage that leaves no trace is not. |
 | **Every admin action** | To the audit log, always |
 | Job failures | |
 | Slow queries above a threshold | The leaderboard is the likely offender |
@@ -103,18 +104,24 @@ which is why auditing is specified before the capabilities themselves are
 
 | Endpoint | Reports | Status |
 | --- | --- | --- |
-| `GET /api/v1/health` | **Readiness.** The process is up **and** the default PostgreSQL connection answers. | **Implemented (M1).** |
-| `GET /up` | **Liveness.** The framework's own probe: the process boots and dispatches. No dependency checks. | Framework default. |
+| `GET /api/v1/health` | **Readiness.** The process is up **and** the default PostgreSQL connection answers. | **Implemented (M1).** Rate-limited since the M2 audit — 60/min per source. |
 | `GET /` | Not a probe. The API-only signpost — see `docs/api/openapi.draft.yaml`. | **Implemented (M1).** |
 
 `/api/v1/health` returns **503** when a dependency is unreachable, not 500 and not a
 misleading 200. 503 is what tells a load balancer to take the instance out of rotation
 rather than page a human.
 
-**Liveness and readiness are separate endpoints on purpose.** A liveness probe that fails
-on a transient database blip causes restarts instead of reporting the blip; a readiness
-probe that ignores the database reports green from a process that cannot serve a single
-request. `/up` is the former, `/api/v1/health` the latter.
+**`/up` was removed at the M2 audit.** Laravel's built-in liveness route renders a
+**Blade view** — an HTML page, from a service whose root route says "no web access
+allowed" — and it appeared in no contract, because the routes-in-contract gate read
+route files and could not see a route the framework had registered.
+
+Losing it costs little. Liveness and readiness genuinely are different questions — a
+liveness probe that fails on a transient database blip causes restarts instead of
+reporting the blip — but a process that cannot answer `/api/v1/health` at all is not
+alive either, and a readiness probe that reports 503 is already distinguishable from one
+that does not answer. If a separate liveness endpoint is wanted later it should be a JSON
+route in `routes/api.php`, in the contract, like everything else here.
 
 **Readiness checks exactly the dependencies this service relies on — today, one.** Cache,
 queue, mail and Redis are not adopted by this project (see `caching-and-redis.md` and
