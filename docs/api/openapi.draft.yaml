@@ -5,11 +5,16 @@ info:
   version: 0.1.0-draft
   summary: Contract shape for the Purrenade backend.
   description: |
-    **M0 DRAFT — contract shape only. No implementation exists.**
+    **Part contract, part record.** Twenty-one operations are implemented and
+    live; the rest are the intended shape of endpoints that do not exist yet.
+    Every operation says which it is, and a CI gate fails the build if a
+    registered route is missing from this document.
 
-    This document defines the intended shape of the Purrenade REST API so the
-    frontend can be designed against it before the backend is bootstrapped. It is
-    not generated from code, and no controller, migration, or endpoint exists yet.
+    Implemented: the root and readiness routes, and the whole authentication and
+    access surface. Not yet implemented: run lifecycle and progression (M9,
+    blocked on ADR-0006), leaderboards (M10), achievements and characters (M11),
+    profile beyond the display name, account deletion (SEC-3), and the admin
+    capabilities (M13). This document is not generated from code.
 
     Authoritative product behavior lives in the frontend repository's
     Product/Game Specification (`purrenade/docs/product/`). Conventions for

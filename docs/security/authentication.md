@@ -238,4 +238,3 @@ per-IP alone misses a botnet attacking one. Concrete values are in
 | ~~AUTH-2~~ | **Resolved at M2:** revoke-all keeps the current session. §6. |
 | ~~AUTH-3~~ | **Resolved at M2:** progressive throttling, no lockout. §7. |
 | AUTH-4 | Device labelling **resolved**; location and its retention remain OPEN. `../architecture/auth-architecture.md` §8. |
-| AUTH-4 | Device labelling and location derivation |

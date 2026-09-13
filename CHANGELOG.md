@@ -6,6 +6,28 @@ This project does not yet have released versions.
 
 ## [Unreleased]
 
+### Added — M2 (delivery label): authentication and access foundation
+
+Delivered roadmap **M2 and M3** together. See `purrenade/docs/product/milestones.md` for the
+delivery history and why the labels and the roadmap numbers do not line up one-for-one.
+
+- **Auth core (roadmap M2)** — registration, login, email verification by 6-digit code with a
+  42-second resend cooldown, password reset by link, the argon2id password policy with a breach
+  check, two-dimensional rate limiting on every endpoint, and RFC 9457 Problem Details on every
+  path of the host.
+- **Two-factor, roles and sessions (roadmap M3)** — TOTP enrolment, challenge and disable; eight
+  single-use recovery codes stored as keyed hashes; `player` and `admin` roles enforced by a
+  database check constraint; mandatory admin two-factor bound to the credential generation; and
+  session listing, per-session revocation and revoke-all over Sanctum token rows.
+
+### Added — M1C (delivery label): runtime completion
+
+- JSON root route, a readiness probe that checks PostgreSQL, systemd user services.
+
+### Added — M1 (delivery label): repository bootstrap
+
+- Laravel skeleton on PostgreSQL, Pint, PHPStan/Larastan, Pest, CI, `.env.example`. No product code.
+
 ### Changed — M0.6: decision normalization
 
 **Newly APPROVED**

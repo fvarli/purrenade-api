@@ -3,8 +3,11 @@
 REST API for **Purrenade**, a browser-first, mobile-first casual endless
 score-attack runner. Laravel · PostgreSQL.
 
-> **Status: bootstrapped (M1).** Laravel, the toolchain and quality gates are in place.
-> **No product features exist yet** — authentication begins at M2.
+> **Status: authentication shipped.** Laravel, the toolchain and quality gates are in place, and
+> the authentication and access surface is implemented: registration, login, email verification,
+> password reset, TOTP two-factor with recovery codes, `player`/`admin` roles with mandatory admin
+> two-factor, and session/device management. No gameplay endpoint exists yet — run submission is
+> **M9** and is blocked on ADR-0006.
 
 ## Local setup
 
@@ -102,8 +105,15 @@ mutual compatibility immediately before bootstrap. See
 
 ## Development status
 
-The current milestone is **M0 — documentation foundation**. Framework bootstrap
-is M1 and requires explicit approval. See
+Delivered here: **M1** (bootstrap), **M2** (auth core) and **M3** (two-factor, roles, admin gate,
+session management) — the last two both shipped in the commit labelled M2, which is why every
+document in this repository dates that work to M2.
+
+The next milestone touching this repository is **M9** (run lifecycle, anti-cheat boundary,
+progression), which is blocked on
+[ADR-0006](docs/decisions/ADR-0006-run-validation-and-anti-cheat-boundary.md).
+
+The roadmap, with the delivery status of every milestone, lives in
 `purrenade/docs/product/milestones.md`.
 
 ## License

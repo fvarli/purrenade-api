@@ -118,14 +118,79 @@ jobs:
       - name: Authentication secrets are never logged
         run: |
           set -euo pipefail
-          # App\Support\AuthLog is the only writer to the security channel, and
-          # it accepts no credential by design. This checks the property from the
-          # other direction: no call site anywhere passes one.
-          if grep -rnE "AuthLog::[a-zA-Z]+\(.*(\\$password|\\$code|\\$token|\\$secret|recovery_code|current_password)" app/; then
-            echo "ERROR: a credential is being passed to the security log."
-            exit 1
-          fi
-          echo "no credential reaches the security log"
+          # This gate rested on a premise that was not true.
+          #
+          # It claimed `App\Support\AuthLog` was the only writer to the security
+          # channel and then grepped for `AuthLog::` alone — so anything logging
+          # by another route was invisible to it, and `App\Support\BreachCheck`
+          # already does exactly that. It also matched on one line only (Pint
+          # wraps long calls), on five literal variable names, and in `app/` only.
+          #
+          # Checked from both directions now: every writer to the channel is
+          # known, and no logging call anywhere passes a credential-shaped value.
+          python3 - <<'EOF'
+          import pathlib, re, sys
+
+          ALLOWED_WRITERS = {'app/Support/AuthLog.php', 'app/Support/BreachCheck.php'}
+
+          # A credential is a *variable* holding one, or an array *key* naming
+          # one. Not a string value: `'method' => 'recovery_code'` is a label
+          # saying which factor was used, and flagging it taught nobody anything.
+          CREDENTIAL = re.compile(
+              r"\$(password|passwd|pwd|secret|otp|plaintext|recovery_?code|current_password|new_password)\w*"
+              r"|['\"](password|current_password|new_password|password_confirmation|recovery_code|two_factor_secret|plain_?text_token)['\"]\s*=>",
+              re.I,
+          )
+          LOG_CALL = re.compile(r"(?:Log::|AuthLog::|logger\(\)->|->log\()", re.I)
+
+          def log_calls(text):
+              """Each logging call as one string, however many lines it spans."""
+              lines = text.splitlines()
+
+              for index, line in enumerate(lines):
+                  if not LOG_CALL.search(line):
+                      continue
+
+                  call = line
+                  depth = call.count('(') - call.count(')')
+                  cursor = index
+
+                  while depth > 0 and cursor + 1 < len(lines):
+                      cursor += 1
+                      call += ' ' + lines[cursor].strip()
+                      depth += lines[cursor].count('(') - lines[cursor].count(')')
+
+                  yield index + 1, call
+
+          sources = [p for d in ('app', 'routes', 'config', 'database') for p in pathlib.Path(d).rglob('*.php')]
+
+          unknown_writers, leaks = [], []
+
+          for path in sources:
+              text = path.read_text(encoding='utf-8')
+
+              if "channel('security')" in text and str(path) not in ALLOWED_WRITERS:
+                  unknown_writers.append(str(path))
+
+              for line_number, call in log_calls(text):
+                  if CREDENTIAL.search(call):
+                      leaks.append(f'{path}:{line_number}: {call.strip()[:120]}')
+
+          if unknown_writers:
+              print('ERROR: unrecognised writer to the security channel:')
+              for w in unknown_writers:
+                  print('  ', w)
+              print('Add it to ALLOWED_WRITERS here only after checking it logs no credential.')
+              sys.exit(1)
+
+          if leaks:
+              print('ERROR: a credential-shaped value appears in a logging call:')
+              for leak in leaks:
+                  print('  ', leak)
+              sys.exit(1)
+
+          print(f'no credential reaches any log; {len(ALLOWED_WRITERS)} known security-channel writer(s)')
+          EOF
 
       - name: Record the PostgreSQL version gap
         run: |
@@ -167,8 +232,33 @@ jobs:
               uri = '/' + route['uri'].lstrip('/')
               # The contract is written without the /api/v1 mount prefix.
               path = re.sub(r'^/api/v1', '', uri) or '/'
-              if re.search(r'^\s{2}' + re.escape(path) + r':\s*$', spec, re.M) is None:
-                  missing.append(f"{route['method']} {uri}")
+
+              # The path, and then the methods under it.
+              #
+              # This used to look up the path alone and print the method only in
+              # the error text, so adding DELETE to a path the contract
+              # documents as GET passed silently — the two repositories could
+              # drift by a whole verb without the gate noticing.
+              block = re.search(
+                  r'^\s{2}' + re.escape(path) + r':\s*$\n((?:\s{4}.*\n|\s*\n)*)',
+                  spec, re.M,
+              )
+
+              if block is None:
+                  missing.append(f"{route['method']} {uri} (path absent)")
+                  continue
+
+              documented = {
+                  verb.lower()
+                  for verb in re.findall(r'^\s{4}(get|put|post|patch|delete|head|options):', block.group(1), re.M | re.I)
+              }
+
+              for verb in route['method'].split('|'):
+                  if verb.lower() in ('head', 'options'):
+                      continue
+
+                  if verb.lower() not in documented:
+                      missing.append(f"{verb} {uri} (path documented, method not)")
 
           if missing:
               print('ERROR: routes not present in openapi.draft.yaml:')
@@ -311,6 +401,9 @@ jobs:
                  r'|SI|AU|LB|LO|LR|OPS|ARCH|PWA|RNG|DO|SP|TU|CR|AC|AA|ASSET)-\d+'
                  r'|ADR-\d{4}|#\d+)')
           REF = ONE + r'(?:\s*/\s*' + ONE + r')*'
+          # A resolved question is kept for traceability with its id struck
+          # through. That is a reference, not a missing one.
+          REF = r'(?:~~)?' + REF + r'(?:~~)?'
           bad = []
           for dp, _, fn in os.walk('docs'):
               for f in fn:

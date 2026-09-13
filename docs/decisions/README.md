@@ -8,7 +8,7 @@
 | 0002 | Nuxt + Phaser frontend architecture | Accepted | **Frontend only** — see `purrenade/docs/decisions/` |
 | [0003](ADR-0003-laravel-rest-api-backend.md) | Laravel REST API backend | **Accepted** | Product-wide |
 | [0004](ADR-0004-postgresql-primary-database.md) | PostgreSQL as the primary database | **Accepted** | Product-wide |
-| [0005](ADR-0005-authentication-and-2fa-strategy.md) | Authentication and 2FA strategy | **🔴 Proposed — decision required** | Product-wide |
+| [0005](ADR-0005-authentication-and-2fa-strategy.md) | Authentication and 2FA strategy | **Accepted and implemented** | Product-wide |
 | [0006](ADR-0006-run-validation-and-anti-cheat-boundary.md) | Run validation and anti-cheat boundary | **🔴 Proposed — decision required** | Product-wide |
 | 0007 | Localization strategy | Accepted | Product-wide — mirrored in the frontend; the backend's obligations are summarized below |
 | [0008](ADR-0008-source-of-truth-and-design-reference-hierarchy.md) | Source-of-truth and design-reference hierarchy | **Accepted** | Product-wide |
