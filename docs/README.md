@@ -58,6 +58,7 @@ open parameters resolved. See
 | [caching-and-redis.md](architecture/caching-and-redis.md) | Rate limiting, cache, leaderboard projection |
 | [observability.md](architecture/observability.md) | Correlation IDs, structured logs, no-PII rule |
 | [engineering-standards.md](architecture/engineering-standards.md) | **★** Per-milestone quality checklist |
+| [operations.md](architecture/operations.md) | **★** Establishing the first administrator, how everyone else gets an account, procedures deliberately absent |
 | [local-development.md](architecture/local-development.md) | **★** Local HTTPS, ports, reverse-proxy trust, the two ways to run the API, and the endpoints it answers today |
 | [versions-and-runtime.md](architecture/versions-and-runtime.md) | Version research findings (not pins) |
 

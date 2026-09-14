@@ -90,6 +90,16 @@ final class AuthLog
 
     public const ADMIN_ACCESS_GRANTED = 'auth.admin.access_granted';
 
+    /**
+     * An operator granted the administrator role from the command line.
+     *
+     * The only event here that records a *change* of privilege rather than the
+     * outcome of a check. It is written by `purrenade:admin:promote`, which is
+     * the sole supported way an account becomes an administrator, so this line
+     * is the audit trail for every administrator that has ever existed.
+     */
+    public const ADMIN_ROLE_GRANTED = 'auth.admin.role_granted';
+
     // Profile
     public const DISPLAY_NAME_CHANGED = 'auth.profile.display_name_changed';
 

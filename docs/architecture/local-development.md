@@ -184,12 +184,27 @@ real values, and no test asserts anything about the cost.
 
 ## Creating an administrator locally
 
-There is no self-service route to the admin role, deliberately. Promote an
-existing, **verified** account:
+There is no self-service route to the admin role, deliberately. Register through
+the application, verify the address, then promote that existing account:
 
 ```bash
-php artisan tinker --execute="\App\Models\User::where('email','you@example.test')->update(['role'=>'admin']);"
+php artisan purrenade:admin:promote you@example.test
 ```
+
+The command only ever grants the role. It will not create an account, will not
+set or reset a password, and will not mark an address verified — so it refuses
+an address it cannot find and refuses an account that has not verified. Running
+it against an account that is already an administrator reports that and changes
+nothing.
+
+Promotion signs the account out everywhere and discards any pending two-factor
+challenge. That is the point rather than a side effect: a session that proved
+possession as a player must not silently become an administrative session, so
+the new privilege begins at a sign-in performed after the change. Add `--force`
+to skip the confirmation prompt when scripting.
+
+The same command is the production procedure; the runbook is
+[operations.md](operations.md).
 
 The admin surface then stays refused until all four conditions hold — role,
 verified address, enrolled second factor, and a session that actually passed a

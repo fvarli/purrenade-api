@@ -6,6 +6,41 @@ This project does not yet have released versions.
 
 ## [Unreleased]
 
+### Added — M7.1 (delivery label): safe initial administrator bootstrap
+
+Production-readiness work, backend only. No gameplay, authentication or contract change;
+the frontend is untouched at its M7 commit. The delivery-label row in
+`purrenade/docs/product/milestones.md` — which is the canonical table and lives in the
+frontend repository — is a deliberate follow-up for the next frontend change, so that this
+milestone does not move the frozen frontend commit.
+
+- **`php artisan purrenade:admin:promote <email>`** — the supported way to establish the first
+  administrator. It grants the role to an account that **already exists and has already verified
+  its address**, and does nothing else: it cannot create an account, set or reset a password,
+  mark an address verified, touch a second factor, or grant anything in the game. Unknown and
+  unverified addresses are refused; an account that is already an administrator is reported and
+  left alone, with no write, revocation or log line.
+- **Promotion closes the session it would otherwise hand over.** A player holding a session that
+  already passed a two-factor challenge would satisfy every remaining admin condition the instant
+  the role flipped. The command revokes all sessions and purges pending challenges in the same
+  transaction, so administrative privilege begins at a sign-in performed after the change.
+  `two_factor_version` is deliberately not bumped: a role change does not invalidate the factor.
+- **`auth.admin.role_granted`** added to the existing `AuthLog` vocabulary, recording the user id,
+  the resulting role and the number of sessions revoked — never the address.
+- **`docs/architecture/operations.md`** — the production bootstrap runbook, the account model for
+  players and testers (everyone registers themselves; playable characters are never an
+  authorization mechanism), and the procedures deliberately not offered: no SQL role edit, no
+  production seeder, no account-creating command, no configured administrator.
+
+### Changed
+
+- `docs/architecture/local-development.md` replaces the `tinker --execute` role-edit recipe with
+  the command.
+- `database/seeders/DatabaseSeeder.php` fixed against the current schema (`name` →
+  `display_name`, plus the normalized column) and documented as local and test convenience that
+  must never run in production. The seeded account is an ordinary player; seeding is named
+  nowhere in the bootstrap runbook.
+
 ### Added — M2 (delivery label): authentication and access foundation
 
 Delivered roadmap **M2 and M3** together. See `purrenade/docs/product/milestones.md` for the

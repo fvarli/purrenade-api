@@ -22,6 +22,15 @@ convenience; removing it must expose nothing.
 There is no third role in the approved surface. **OPEN (AD-2):** whether more
 than one admin level is ever needed — nothing suggests it.
 
+Every account starts as `player` and no HTTP route ever writes `role`, so there
+is no self-service path to privilege. The role is granted out of band, to an
+account that already exists and has already verified its address, by
+`php artisan purrenade:admin:promote` — see
+[operations.md](../architecture/operations.md). The command grants only the
+role: it cannot create an account, set a password, verify an address, or touch a
+second factor, and it revokes the account's sessions so the new privilege begins
+at a sign-in performed after the change.
+
 ---
 
 ## 3. Role is not enough — APPROVED
