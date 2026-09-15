@@ -8,6 +8,12 @@ that procedure looks the way it does, and why the alternatives were refused.
 personal datum belongs in this file or any other tracked file; every example
 below uses the reserved `example.test` domain.
 
+This document covers procedures **inside the application**. The environment it
+runs in — deploying a release, PostgreSQL, the queue worker, transactional mail,
+nginx and TLS — is [`../production/README.md`](../production/README.md). In
+production, every command below is invoked through the explicit PHP 8.4 runtime;
+see [`../production/README.md`](../production/README.md) §3.
+
 ---
 
 ## 1. The problem this solves

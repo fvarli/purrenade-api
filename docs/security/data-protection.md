@@ -132,7 +132,7 @@ attached.
 
 | Third party | Status |
 | --- | --- |
-| **Transactional email provider** | Necessary. Receives email addresses. **OPEN (SEC-2):** which provider, and where it processes data. |
+| **Transactional email provider** | Necessary. Receives email addresses. Provider chosen and in production: **Zoho Mail, EU region**, so processing is in the EU. **OPEN (SEC-3):** processor terms, retention at the provider, and the processing-location analysis. |
 | **Font CDN** | **Avoided.** Fonts are **self-hosted** — a font CDN transmits every visitor's IP address to a third party for no functional gain. |
 | **External error tracker** | **OPEN (OB-2).** If used, payloads must be scrubbed before transmission. |
 | **Analytics** | None in the approved surface. Adding any would be a new personal-data decision, not a technical one. |

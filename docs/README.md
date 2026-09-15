@@ -83,6 +83,21 @@ open parameters resolved. See
 | [rate-limiting.md](security/rate-limiting.md) | Limits per endpoint class |
 | [data-protection.md](security/data-protection.md) | **★** KVKK/GDPR, PII, retention, private-source rule |
 
+## Production (`docs/production/`)
+
+How the API actually runs on the production host, and the procedure for changing
+it. Deployment is **manual today**; CI/CD is the next infrastructure milestone.
+The frontend half of this documentation lives in
+[`purrenade/docs/production/`](https://github.com/fvarli/purrenade/tree/main/docs/production).
+
+| Document | Contents |
+| --- | --- |
+| [README.md](production/README.md) | **★ Entry point** — architecture, request path, PHP 8.4 isolation, production configuration and its guards, health, deviations |
+| [deployment.md](production/deployment.md) | **★** Deploying a release, caches, FPM and worker lifecycle, rollback principles, CI/CD invariants |
+| [database-and-queue.md](production/database-and-queue.md) | **★** PostgreSQL and least privilege, backup and restore, migrations, the queue worker, SMTP |
+
+---
+
 ## Testing (`docs/testing/`)
 
 [testing-strategy.md](testing/testing-strategy.md) · [regression-gates.md](testing/regression-gates.md)

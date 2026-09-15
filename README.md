@@ -82,9 +82,15 @@ docs/
   security/       ★ threat model, auth, authorization, 2FA, anti-cheat, rate limiting, data protection
   testing/        testing strategy and regression gates
   decisions/      architecture decision records
+  production/     ★ how this runs in production, and how to deploy it
 ```
 
 Start at [`docs/README.md`](docs/README.md).
+
+For production — what runs where, deploying a release, database backup and
+migration, the queue worker and transactional mail — start at
+[`docs/production/README.md`](docs/production/README.md). The frontend half is
+in [`purrenade/docs/production/`](https://github.com/fvarli/purrenade/tree/main/docs/production).
 
 ## Two decisions block implementation
 

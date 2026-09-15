@@ -38,7 +38,7 @@ Creates an unverified account and dispatches a **6-digit verification code**.
 
 **Validation intent:** username present and within rules (**OPEN, LB-3**); email
 syntactically valid and not already registered; password meets policy
-(**OPEN, SEC-1**).
+(**SEC-1 resolved at M2** — 12–128 characters, breach-checked).
 
 **Enumeration:** registration inherently reveals that an address is taken. Mitigate
 with rate limiting and a generic error rather than a distinguishing message.
@@ -68,9 +68,9 @@ Returns either an authenticated player or a **two-factor challenge requirement**
 | --- | --- |
 | Codes are **hashed at rest**, never stored in plaintext | APPROVED |
 | Single-use; consumed on success | APPROVED |
-| Attempt limit per code, then invalidation | PROPOSED |
-| Code TTL | **OPEN (SEC-2)** |
-| Resend cooldown — v0.3 displays 0:42 | **OPEN (SEC-2)** |
+| Attempt limit per code, then invalidation | **IMPLEMENTED — 5 attempts** (SEC-2 resolved at M2) |
+| Code TTL | **IMPLEMENTED — 10 minutes** (SEC-2 resolved at M2) |
+| Resend cooldown — v0.3 displays 0:42 | **IMPLEMENTED — 42 seconds** (SEC-2 resolved at M2) |
 
 **Resend** returns the remaining cooldown rather than an error, so the client can
 render the countdown the design shows.
@@ -84,7 +84,7 @@ verification.
 | --- | --- |
 | `forgot` returns the **same response whether or not the address exists** | APPROVED — prevents enumeration |
 | Tokens are hashed at rest and single-use | APPROVED |
-| Token TTL | **OPEN (SEC-2)** |
+| Token TTL | **APPROVED — time-limited** (SEC-2 resolved at M2); the concrete value follows the framework password-broker configuration rather than a separately recorded product decision |
 | A successful reset **revokes all existing sessions** | PROPOSED — a reset usually means a compromise |
 | **A reset never disables, resets, or bypasses 2FA** | **APPROVED — security invariant** |
 
@@ -137,8 +137,8 @@ time, and a flag for the current session (v0.3 board 20).
 
 | Ref | Question |
 | --- | --- |
-| SEC-1 | Password policy |
-| SEC-2 | Code/token TTLs and the resend cooldown |
+| ~~SEC-1~~ | **Resolved at M2.** 12–128 characters, no composition rules, breach-checked, argon2id — [`../../security/authentication.md`](../../security/authentication.md) §2. |
+| ~~SEC-2~~ | **Resolved at M2.** [`../../security/authentication.md`](../../security/authentication.md) §3–§4 and [`../../security/rate-limiting.md`](../../security/rate-limiting.md) §2. |
 | AUTH-1 | What an unverified player may access |
 | AUTH-2 | Does revoke-all include the current session? |
 | AUTH-3 | Lockout policy on repeated failures |

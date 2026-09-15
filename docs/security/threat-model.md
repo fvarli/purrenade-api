@@ -64,7 +64,7 @@ See [anti-cheat.md](anti-cheat.md) and
 
 | Threat | Mitigation |
 | --- | --- |
-| Credential stuffing | Rate limiting per account and per source; breach-list checking (SEC-1, OPEN) |
+| Credential stuffing | Rate limiting per account and per source; **breach-list checking via Pwned Passwords k-anonymity** (SEC-1 resolved at M2) |
 | Account enumeration | Identical responses for unknown and wrong credentials; identical forgot-password response regardless of existence; timing that does not distinguish |
 | Verification-code brute force | Codes hashed at rest, attempt-limited, TTL-bounded, rate-limited |
 | Reset-token reuse or theft | Hashed, single-use, short-lived; a successful reset revokes sessions (PROPOSED) |
@@ -144,7 +144,7 @@ cannot work, instead of on server validation that can.
 | --- | --- |
 | ADR-0005 | *(Direction Accepted.)* Session lifetime, CSRF pattern and 2FA enforcement point remain, at M2 |
 | ADR-0006 | Run validation model |
-| SEC-1 | Password policy, including breach-list checking |
+| ~~SEC-1~~ | **Resolved at M2.** Password policy and breach-list checking — [authentication.md](authentication.md) §2. |
 | SEC-3 | KVKK/GDPR: deletion, export, consent, retention |
 | SEC-4 | Published security contact and disclosure timeline |
 | LB-7 | Automated profanity and confusable screening — **future hardening**, not a v1 blocker. Admin force-rename is the approved v1 answer to an abusive or impersonating name. |
