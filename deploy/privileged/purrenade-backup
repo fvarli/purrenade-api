@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+#
+# Purrenade pre-migration database backup — PRIVILEGED HELPER (TEMPLATE).
+#
+#   purrenade-backup          # no arguments, ever
+#
+# ---------------------------------------------------------------------------
+# THIS FILE IS A TEMPLATE. DO NOT GRANT SUDO TO THIS PATH.
+# ---------------------------------------------------------------------------
+#
+# Bootstrap installs a ROOT-OWNED COPY at /usr/local/sbin/purrenade-backup,
+# mode 0755, outside every deploy-writable directory. The sudoers rule names
+# that installed copy and nothing else.
+#
+# Granting sudo to a file inside the deployment checkout would be a root shell
+# with extra steps: the account that can write the script is the account that
+# runs it as root. The copy exists precisely to break that.
+#
+# ---------------------------------------------------------------------------
+# Why this exists at all
+# ---------------------------------------------------------------------------
+#
+# The first draft of this milestone documented two sudoers rules:
+#
+#     ALL=(postgres) NOPASSWD: /usr/bin/pg_dump
+#     ALL=(root)     NOPASSWD: /usr/bin/tee /<backup-dir>/*
+#
+# Both were rejected by an independent audit, correctly. The first places no
+# restriction on arguments, so the deployment account could dump ANY database on
+# a host that runs unrelated applications, and could write files as `postgres`.
+# The second is a root-owned arbitrary-file-write primitive: sudo's own manual
+# warns that wildcards in command arguments are not a security boundary.
+#
+# The fix is not a tighter wildcard. It is to remove the arguments. This helper
+# takes none: the database and the destination come from a root-owned
+# configuration file the deployment account cannot write, and the filename is
+# generated here. The account gets the OUTCOME of a backup, never the capability
+# to perform one against a target of its choosing.
+
+set -euo pipefail
+
+# Overridable only for the test suite. Unreachable through the sudoers rule:
+# sudo runs with env_reset by default, so an environment variable set by the
+# calling account does not survive into this process. The test that asserts the
+# documented sudoers contract contains no `env_keep` is what keeps that true.
+readonly CONF="${PURRENADE_BACKUP_CONF:-/etc/purrenade/backup.conf}"
+
+readonly DB_PATTERN='^[A-Za-z_][A-Za-z0-9_]{0,62}$'
+readonly DIR_PATTERN='^/[A-Za-z0-9._/-]+$'
+
+die() { printf 'purrenade-backup: %s\n' "$1" >&2; exit 1; }
+
+# No arguments. Not "arguments are validated" — there are none to validate, so
+# there is no argv surface for the deployment account to reach through.
+[[ $# -eq 0 ]] || die "takes no arguments (got $#). The database and destination come from ${CONF}."
+
+[[ -r "$CONF" ]] || die "configuration not readable: ${CONF}"
+
+# Parsed, never sourced. Sourcing would execute whatever the file contains, and
+# a configuration file is data.
+read_conf() {
+    local key="$1" value
+    value="$(grep -E "^${key}=" "$CONF" | tail -n 1 | cut -d= -f2- || true)"
+    printf '%s' "${value//[$'\t\r\n ']/}"
+}
+
+database="$(read_conf PURRENADE_DB)"
+backup_dir="$(read_conf PURRENADE_BACKUP_DIR)"
+
+[[ -n "$database" ]] || die "PURRENADE_DB is not set in ${CONF}"
+[[ -n "$backup_dir" ]] || die "PURRENADE_BACKUP_DIR is not set in ${CONF}"
+[[ "$database" =~ $DB_PATTERN ]] || die "PURRENADE_DB is not a valid identifier"
+[[ "$backup_dir" =~ $DIR_PATTERN ]] || die "PURRENADE_BACKUP_DIR is not a safe absolute path"
+
+if [[ "${PURRENADE_BACKUP_DRY_RUN:-0}" != "1" ]]; then
+    [[ "$(id -u)" -eq 0 ]] || die "must run as root (via the sudoers rule)"
+    [[ -d "$backup_dir" ]] || die "backup directory does not exist: ${backup_dir}"
+    command -v pg_dump >/dev/null || die "pg_dump is not installed"
+    command -v pg_restore >/dev/null || die "pg_restore is not installed"
+fi
+
+# The filename is generated here, so no caller can choose it and no caller can
+# traverse out of the configured directory.
+target="${backup_dir}/pre-migration-$(date -u +%Y%m%dT%H%M%SZ).dump"
+
+if [[ "${PURRENADE_BACKUP_DRY_RUN:-0}" == "1" ]]; then
+    printf 'purrenade-backup: DRY RUN, would dump %s to %s\n' "$database" "$target" >&2
+    printf '%s\n' "$target"
+    exit 0
+fi
+
+# Already root, so `runuser` rather than another sudo hop. pg_dump writes to
+# stdout and this process performs the redirect: the postgres account never
+# needs to traverse a root-restricted directory, and never chooses a path.
+umask 077
+if ! runuser -u postgres -- pg_dump --format=custom "$database" > "$target"; then
+    rm -f "$target"
+    die "pg_dump failed; no backup was produced"
+fi
+
+[[ -s "$target" ]] || { rm -f "$target"; die "backup is empty; refusing to report success"; }
+
+# A backup that has not been listed is not a backup. This is the cheapest proof
+# that the file is a readable archive rather than a truncated transfer.
+if ! pg_restore --list "$target" >/dev/null 2>&1; then
+    die "backup is not a readable archive: ${target} — do NOT migrate"
+fi
+
+chmod 600 "$target"
+
+# stdout is the contract: exactly one line, the path of a verified backup.
+printf '%s\n' "$target"

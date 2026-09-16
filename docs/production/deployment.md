@@ -151,7 +151,16 @@ This is why the pre-migration backup is not optional. It is the only thing that
 makes option 3 available at all, and it has to exist *before* the migration that
 might make it necessary.
 
-## 6. What future CI/CD must preserve
+## 6. The automated pipeline, and the invariants it keeps
+
+**This procedure is now automated** — see [ci-cd.md](ci-cd.md) for the workflow,
+the failure boundaries, the security model and the operator setup it depends on.
+The manual steps above remain correct and remain the fallback when the pipeline
+is unavailable.
+
+Everything below was already true of the manual process and is now enforced by
+`.github/workflows/deploy.yml`, `deploy/bin/deploy.sh` and
+`deploy/bin/backup.sh`; a change that drops any of it is a regression.
 
 **Must preserve**
 
@@ -175,6 +184,12 @@ might make it necessary.
 - Treat `migrate:rollback` as automated recovery
 - Leave the queue worker running old code after a deploy
 
-Do not create deployment GitHub Actions in this milestone. The existing CI
-workflow formats, analyses, tests and checks contracts and documentation; it
-does not deploy, and nothing here changes that.
+Deployment is **`workflow_dispatch` only**: no push to `main`, however green,
+migrates a production schema on its own. The `production` environment, its
+protection rules and its secrets are operator-configured and are listed in
+[ci-cd.md §7](ci-cd.md#7-environment-configuration).
+
+The pipeline adds no rollback automation. It reports **which boundary** it
+stopped at — and stops before migrating if the backup cannot be proven readable.
+`tests/deploy/deploy.test.sh` holds that ordering, and the absence of every
+forbidden command, to the rules above.

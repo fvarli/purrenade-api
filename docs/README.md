@@ -86,8 +86,9 @@ open parameters resolved. See
 ## Production (`docs/production/`)
 
 How the API actually runs on the production host, and the procedure for changing
-it. Deployment is **manual today**; CI/CD is the next infrastructure milestone.
-The frontend half of this documentation lives in
+it. A deployment pipeline exists but **has not yet run against production**
+(OPS-3); the manual procedure remains the fallback. The frontend half of this
+documentation lives in
 [`purrenade/docs/production/`](https://github.com/fvarli/purrenade/tree/main/docs/production).
 
 | Document | Contents |
@@ -95,6 +96,7 @@ The frontend half of this documentation lives in
 | [README.md](production/README.md) | **★ Entry point** — architecture, request path, PHP 8.4 isolation, production configuration and its guards, health, deviations |
 | [deployment.md](production/deployment.md) | **★** Deploying a release, caches, FPM and worker lifecycle, rollback principles, CI/CD invariants |
 | [database-and-queue.md](production/database-and-queue.md) | **★** PostgreSQL and least privilege, backup and restore, migrations, the queue worker, SMTP |
+| [ci-cd.md](production/ci-cd.md) | **★** The deployment pipeline: triggers, failure boundaries, security model, operator bootstrap |
 
 ---
 

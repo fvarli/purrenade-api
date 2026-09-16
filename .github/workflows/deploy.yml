@@ -1,0 +1,178 @@
+name: Deploy to production
+
+# Manual only. See docs/production/ci-cd.md for why, and for the operator setup
+# this workflow depends on.
+#
+# The backend deploys an exact Git revision from the production checkout rather
+# than a transferred artifact: PHP has no build step, and the proven manual
+# procedure already works this way. Frontend and backend are not forced into
+# identical mechanics because their runtime models genuinely differ.
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: 'Full 40-character commit SHA to deploy (must be on main and CI-green)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+# A deployment that migrates a schema must never be interrupted, and two must
+# never overlap.
+concurrency:
+  group: purrenade-api-production
+  cancel-in-progress: false
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # validate — untrusted input is handled here, where no secret exists
+  # ---------------------------------------------------------------------------
+  validate:
+    name: Validate the requested revision
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      sha: ${{ steps.check.outputs.sha }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: The revision is a full SHA, on main, and CI-green
+        id: check
+        env:
+          # Never spliced into script text. The pattern test below is the only
+          # thing that ever looks at this value.
+          REQUESTED_SHA: ${{ inputs.sha }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$REQUESTED_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Not a full 40-character lowercase commit SHA."
+            exit 1
+          fi
+
+          if ! git cat-file -e "${REQUESTED_SHA}^{commit}" 2>/dev/null; then
+            echo "::error::That commit does not exist in this repository."
+            exit 1
+          fi
+
+          if ! git merge-base --is-ancestor "$REQUESTED_SHA" origin/main; then
+            echo "::error::That commit is not reachable from origin/main. Only reviewed, merged revisions deploy."
+            exit 1
+          fi
+
+          # Four constraints, all explicit: the project's own ci.yml, these
+          # exact bytes, a `push`-event run (a pull_request run tests the commit
+          # in PR context, which is not the same as main being green at that
+          # revision), and conclusion == success.
+          #
+          # --paginate, because the default page size is 30 and a commit with
+          # many reruns could otherwise hide its successful run past page one.
+          # A failure of `gh` aborts under `set -e`, so this fails closed.
+          successful="$(gh api --paginate \
+            "repos/${REPO}/actions/workflows/ci.yml/runs?head_sha=${REQUESTED_SHA}&status=completed&event=push" \
+            --jq '[.workflow_runs[] | select(.conclusion == "success")] | length' \
+            | awk '{ total += $1 } END { print total + 0 }')"
+
+          if [[ "$successful" -lt 1 ]]; then
+            echo "::error::No successful push-event CI run recorded for that commit. Deploy only CI-green revisions merged to main."
+            exit 1
+          fi
+
+          echo "sha=${REQUESTED_SHA}" >> "$GITHUB_OUTPUT"
+          echo "Validated ${REQUESTED_SHA}: on main, CI-green."
+
+  # ---------------------------------------------------------------------------
+  # deploy — the only job that holds production credentials
+  # ---------------------------------------------------------------------------
+  deploy:
+    name: Deploy to production
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Environment protection rules are configured in GitHub, not here. Required
+    # reviewers and a deployment branch policy of `main` are OPERATOR settings;
+    # this file cannot enforce them and does not claim to. See
+    # docs/production/ci-cd.md section 6.
+    environment:
+      name: production
+      url: ${{ vars.PROD_API_PUBLIC_URL }}
+    permissions:
+      contents: read
+    env:
+      SHA: ${{ needs.validate.outputs.sha }}
+      PROD_HOST: ${{ secrets.PROD_HOST }}
+      PROD_USER: ${{ secrets.PROD_USER }}
+      PROD_PORT: ${{ vars.PROD_SSH_PORT }}
+      API_ROOT: ${{ vars.PROD_API_ROOT }}
+      HEALTH_URL: ${{ vars.PROD_API_HEALTH_URL }}
+    steps:
+      # Checked out so deploy/bin/* from the reviewed revision can be piped to
+      # the host. Nothing is copied and left behind.
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          ref: ${{ needs.validate.outputs.sha }}
+          persist-credentials: false
+
+      - name: Configure the SSH client
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.PROD_SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.PROD_SSH_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+          test -s ~/.ssh/deploy_key  || { echo "::error::PROD_SSH_PRIVATE_KEY is empty"; exit 1; }
+          test -s ~/.ssh/known_hosts || { echo "::error::PROD_SSH_KNOWN_HOSTS is empty"; exit 1; }
+          for required in API_ROOT HEALTH_URL; do
+            if [[ -z "${!required}" ]]; then
+              echo "::error::vars.PROD_${required} is not configured for the production environment"
+              exit 1
+            fi
+          done
+
+      # The database name and the backup destination are deliberately NOT
+      # supplied here. They live in a root-owned configuration file that the
+      # deployment account cannot write, read only by the privileged backup
+      # helper. This workflow cannot choose what gets dumped or where it lands.
+      - name: Deploy the revision
+        id: deploy
+        run: |
+          set -euo pipefail
+          deploy/bin/remote-exec.sh \
+            --host "$PROD_HOST" --user "$PROD_USER" --port "${PROD_PORT:-22}" \
+            --key ~/.ssh/deploy_key --script deploy/bin/deploy.sh -- \
+            --root "$API_ROOT" --sha "$SHA" --health-url "$HEALTH_URL"
+
+      - name: Verify the public HTTPS origin
+        run: |
+          set -euo pipefail
+          deploy/bin/health-check.sh --url "$HEALTH_URL" --attempts 15 --interval 2
+
+      # There is deliberately NO automatic rollback here.
+      #
+      # Anything that can fail after the migration phase does so with the schema
+      # already changed. Checking out the previous revision would not undo that,
+      # and an automated `migrate:rollback` runs destructive down() methods. The
+      # script reports which boundary it stopped at; a human decides between a
+      # forward fix and a deliberately planned restore.
+      - name: Explain the failure boundary
+        if: failure()
+        run: |
+          echo "::warning::Deployment failed. Read the boundary reported above."
+          echo "No automatic rollback is attempted: see docs/production/deployment.md section 5."
+
+      - name: Report the deployed revision
+        if: success()
+        run: echo "Deployed ${SHA}" >> "$GITHUB_STEP_SUMMARY"

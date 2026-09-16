@@ -175,7 +175,7 @@ and is not a Purrenade health endpoint.
 | # | Current state | Position |
 | --- | --- | --- |
 | 1 | **PostgreSQL 16.15 in production; the project target is 18.x** | A known, accepted deviation. The target is **not** rewritten to 16. A dedicated PG18 compatibility gate lands before database-sensitive product work at M9. |
-| 2 | Deployment is manual | CI/CD is the **next** infrastructure milestone (OPS-3) |
+| 2 | A deployment pipeline exists but has never run against production | Implemented and locally tested; the operator bootstrap and a first automated run remain (OPS-3). Manual deployment stays the fallback. |
 | 3 | Reboot-survival not yet verified | Units are enabled; a controlled restart drill is outstanding (OPS-5) |
 | 4 | One queue worker, database driver | Correct at this volume; revisit with queue depth (QJ-*) |
 

@@ -18,16 +18,21 @@ env:
   # and PHPUnit 13 (>=8.4.1) make 8.4 the real floor.
   PHP_VERSION: '8.4'
 
+# Every external action is pinned to a full commit SHA, with the release in a
+# trailing comment. A tag is a moving pointer: whoever can move `v2` can run
+# their code in this workflow. The comment is for humans; the SHA is the
+# contract. Re-resolve both when bumping, never edit the comment alone.
 jobs:
   app:
     name: Format, analyse, test
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
 
       - name: Set up PHP
-        uses: shivammathur/setup-php@v2
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
         with:
           php-version: ${{ env.PHP_VERSION }}
           extensions: pdo_pgsql, pgsql, mbstring, xml, curl, zip, bcmath, intl
@@ -202,8 +207,9 @@ jobs:
   contract:
     name: OpenAPI contract
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
 
       - name: Validate the OpenAPI document
         run: npx --yes @redocly/cli@latest lint docs/api/openapi.draft.yaml
@@ -354,8 +360,9 @@ jobs:
   docs:
     name: Documentation checks
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
 
       - name: Verify documentation structure
         run: |

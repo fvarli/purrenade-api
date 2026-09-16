@@ -1,0 +1,88 @@
+# Purrenade API queue worker — PRODUCTION system unit TEMPLATE.
+#
+# ---------------------------------------------------------------------------
+# THIS IS NOT A TRANSCRIPTION OF THE RUNNING PRODUCTION UNIT.
+# ---------------------------------------------------------------------------
+#
+# A worker is already running in production and was verified end to end during
+# the first manual deployment. Its unit file exists only on that host — it has
+# never been in version control, which is why this template exists at all.
+#
+# Nobody has read the running unit while writing this file. The directives below
+# are reconstructed from the documented runtime contract in
+# docs/production/database-and-queue.md section 4, which records the execution
+# identity, the working directory, the explicit PHP 8.4 runtime, the worker
+# flags and the restart behaviour. Everything else the running unit may contain
+# is unknown here.
+#
+# So bootstrap does NOT install this over a working unit. The procedure in
+# docs/production/ci-cd.md requires an operator to diff this against the live
+# unit first and reconcile the differences deliberately. Replacing a proven unit
+# with an unverified one, during the same milestone that first automates
+# deployment, is two risks taken at once for no benefit.
+#
+#   @DEPLOY_USER@   the dedicated unprivileged deployment account
+#   @API_ROOT@      the API deployment directory
+#   @PHP_BIN@       the absolute path to PHP 8.4
+#
+# The worker is load-bearing for registration: verification mail is queued, so a
+# stopped worker means codes are written to the jobs table and never delivered.
+# Nothing errors. That silence is why this is a supervised service.
+
+[Unit]
+Description=Purrenade API queue worker
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=@DEPLOY_USER@
+Group=www-data
+WorkingDirectory=@API_ROOT@
+
+# PHP 8.4 by absolute path. The host's generic PHP is the 8.3 family for
+# unrelated applications, and a worker on the wrong runtime fails in ways that
+# look like application bugs.
+#
+# --max-time cycles the process hourly so a long-lived PHP worker cannot
+# accumulate leaked state. It is NOT the deployment mechanism: a deploy restarts
+# this unit explicitly, because a running worker holds the old code in memory.
+ExecStart=@PHP_BIN@ artisan queue:work database \
+    --sleep=3 \
+    --tries=3 \
+    --timeout=90 \
+    --max-time=3600
+
+Restart=always
+RestartSec=5
+SyslogIdentifier=purrenade-queue
+
+# PrivateTmp is the one sandboxing directive known to be true of the running
+# worker: database-and-queue.md section 4 records it, and records the diagnostic
+# trap it creates (a job writing to /tmp is not writing to the host's /tmp).
+PrivateTmp=true
+
+# systemd kills the whole control group, so no job outlives a stop.
+KillMode=mixed
+TimeoutStopSec=30
+
+# ---------------------------------------------------------------------------
+# PROPOSED — NOT VERIFIED AGAINST PRODUCTION. Deliberately left commented out.
+# ---------------------------------------------------------------------------
+#
+# These are reasonable hardening for a queue worker and were enabled in an
+# earlier draft of this template. An audit pointed out the obvious problem: no
+# one has checked whether the running worker tolerates them. ProtectSystem=full
+# makes /usr, /boot and /etc read-only; ProtectHome hides home directories;
+# NoNewPrivileges blocks setuid. Any of the three could break a path the worker
+# genuinely uses, and the failure would appear as mail silently not being sent.
+#
+# Enable them deliberately, one at a time, with the worker observed afterwards —
+# not as a side effect of adopting CI/CD.
+#
+# ProtectSystem=full
+# ProtectHome=true
+# NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
