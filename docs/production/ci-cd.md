@@ -1,15 +1,17 @@
 # CI/CD — API
 
-How the API reaches production, what the pipeline may and may not do, and
-exactly what an operator must configure before the first automated deployment.
+How the API reaches production, what the pipeline may and may not do, and the
+operator-managed contract it depends on.
 
 Deploying by hand is [deployment.md](deployment.md); that procedure is what this
 pipeline automates, and it remains the fallback when the pipeline is unavailable.
 
-> **Nothing here has ever run against production.** The implementation is
-> complete and locally tested, but the operator bootstrap in
-> [§6](#6-production-bootstrap-still-required) is outstanding and the first
-> automated deployment has not happened. **OPS-3 stays OPEN** until it has.
+> The deployment pipeline has been exercised against production. It remains a
+> controlled, manual operation: a failed run is not a successful deployment
+> merely because the checkout advanced or health happens to be green. Use the
+> reported failure boundary and complete the remaining sequence deliberately.
+> **OPS-3 remains OPEN** until a controlled automated deployment completes
+> successfully.
 
 ---
 
@@ -25,8 +27,8 @@ pipeline automates, and it remains the fallback when the pipeline is unavailable
 **Deployment is manual on purpose.** Automatic deployment on every green push
 would mean a documentation merge can restart a live service on a host that runs
 unrelated applications, and it removes the moment where a person decides that
-now is a good time to migrate a schema. This is the first automated deployment
-this project has had; the few minutes saved are not worth spending that.
+now is a good time to migrate a schema. The few minutes saved by automatic
+deployment are not worth spending that control point.
 
 Concurrency never cancels a deployment in flight. A run interrupted between
 migration and cache rebuild is worse than a queued one.
@@ -63,6 +65,11 @@ CACHES        config:cache · route:cache · event:cache
 SERVICES      reload php8.4-fpm · restart purrenade-queue.service
 HEALTH        GET /api/v1/health, retried
 ```
+
+The validated `--root` is canonicalized and becomes the deployment process cwd
+before the checkout phase. Therefore every repository-relative operation,
+including Composer lifecycle scripts, is bound to the intended application
+checkout rather than an SSH login directory or the transport script's location.
 
 Then the workflow runs a public HTTPS smoke against the same endpoint.
 
@@ -207,11 +214,12 @@ answer — which would otherwise hold the deployment lock until the job timed ou
 
 nginx is **never** restarted by the pipeline: it serves unrelated applications.
 
-## 6. Production bootstrap still required
+## 6. Production bootstrap and reconciliation
 
-None of this has been done. Each step is an operator action; **the pipeline
-cannot bootstrap itself**, and nothing below should be performed by an automated
-agent.
+The initial production bootstrap is operator-managed. The pipeline cannot
+bootstrap itself; do not blindly reapply these steps to a running host. They are
+the contract to reconcile deliberately when the deployment identity, privileged
+helper, service units, or GitHub environment configuration changes.
 
 1. **Create the deployment account** on the host — unprivileged, owning the API
    deployment directory.
@@ -313,8 +321,9 @@ What follows from it:
   revision wherever the change allows it. Additive first, destructive later, in
   a separate release — a column dropped in the same deploy that stops using it
   is a column the old code is still selecting during the window.
-- **The first automated backend deployment is the higher-risk one**, because it
-  is the first time this sequence runs unattended.
+- **Every in-place backend deployment has a transition window**, so the
+  documented failure boundaries and recovery principle remain operationally
+  significant even after prior successful runs.
 - **Automatic rollback does not solve this and is not offered.** Once the
   migration phase has run the schema has changed, and checking out the previous
   revision does not undo it.

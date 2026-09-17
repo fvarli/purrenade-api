@@ -1,8 +1,8 @@
 # API deployment
 
-The manual procedure in use today. **There is no CI/CD yet** — automating this
-is the next infrastructure milestone, and [§5](#5-what-future-cicd-must-preserve)
-records what that automation has to keep.
+The manual procedure remains the fallback. The controlled automated pipeline is
+documented in [ci-cd.md](ci-cd.md); it deploys only a reviewed, exact,
+CI-successful SHA after the production environment gate.
 
 Read [README.md](README.md) first for the environment these steps assume.
 
@@ -14,6 +14,14 @@ Unlike the frontend, the API is deployed from a **production Git checkout**
 rather than a transferred artifact: PHP needs no build step, and Composer can
 install exactly what the lockfile names. What the two share is the rule that
 the revision must be reviewed, exact and already pushed.
+
+The deployment script validates the application root supplied by `--root`,
+canonicalizes it, and changes into it before any repository-relative command.
+This makes Composer and Laravel behavior independent of the SSH login directory,
+`HOME`, the workflow runner cwd, and the temporary transport script's cwd. A
+checkout advancing alone is not a successful deployment: dependencies, backup,
+migrations, caches, services, and health must still complete, with the reported
+failure boundary guiding recovery.
 
 ```
 reviewed revision, already on origin/main
@@ -32,9 +40,6 @@ reviewed revision, already on origin/main
 The checkout could technically commit and push; doing so is exceptional hotfix
 behaviour only. Source edited on the server is drift that the next deploy
 silently reverts and that is invisible from the repository.
-
-The first production deployment used backend revision
-`8046fb5dcf900538b5b97ed137fed9fa133f9db1`.
 
 ## 2. Deploying
 

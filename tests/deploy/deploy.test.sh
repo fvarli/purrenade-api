@@ -36,7 +36,7 @@ code_of() { grep -vE '^[[:space:]]*#' "$@"; }
 
 # A directory that looks enough like a Git checkout for preflight.
 make_checkout() {
-    local d; d="$(mktemp -d)"; mkdir -p "$d/.git"; printf '%s' "$d"
+    local d; d="$(mktemp -d)"; mkdir -p "$d/.git"; printf '{}' > "$d/composer.json"; printf '#!/bin/sh\n' > "$d/artisan"; printf '%s' "$d"
 }
 
 # --- deploy.sh: revision validation ------------------------------------------
@@ -72,6 +72,15 @@ t_rejects_non_git_root() {
     [[ $? -ne 0 ]] \
         && pass "a root that is not a Git checkout is refused" \
         || fail "a root that is not a Git checkout is refused" "accepted"
+    rm -rf "$d"
+}
+
+t_rejects_root_without_composer_manifest() {
+    local d; d="$(mktemp -d)"; mkdir -p "$d/.git"
+    "$DEPLOY" --root "$d" --sha "$SHA" --dry-run >/dev/null 2>&1
+    [[ $? -ne 0 ]] \
+        && pass "a Git root without composer.json is refused" \
+        || fail "a Git root without composer.json is refused" "accepted"
     rm -rf "$d"
 }
 
@@ -127,6 +136,64 @@ t_dry_run_uses_explicit_php_84() {
         && fail "never invokes a bare php" "bare php found" \
         || pass "never invokes a bare php"
     rm -rf "$root"
+}
+
+# This reproduces the production failure shape: deploy.sh is invoked from an
+# unrelated SSH-login-like directory, while --root names a separate checkout.
+# The stubs record their cwd, so this checks observable process behavior rather
+# than merely asserting that the source contains a cd command.
+t_repository_commands_run_from_validated_root() {
+    local work fixture caller log php composer
+    work="$(mktemp -d)"
+    fixture="$work/application root; \$(not-executed) [literal]"
+    caller="$work/ssh login home"
+    log="$work/cwds"
+    mkdir -p "$fixture/.git" "$caller" "$work/bin"
+    printf '{}' > "$fixture/composer.json"
+    printf '#!/bin/sh\n' > "$fixture/artisan"
+
+    php="$work/php8.4"
+    composer="$work/composer"
+    printf '%s\n' '#!/usr/bin/env bash' 'if [[ "$1" == "-r" ]]; then printf 8.4; exit 0; fi' 'printf "php:%s:%s\n" "${2##*/}" "$PWD" >> "$DEPLOY_CWD_LOG"' > "$php"
+    printf '# composer fixture\n' > "$composer"
+    chmod +x "$php"
+
+    printf '%s\n' '#!/usr/bin/env bash' 'case "$1" in -C) shift 2;; esac' 'operation="$1"' 'printf "git:%s:%s\n" "$operation" "$PWD" >> "$DEPLOY_CWD_LOG"' 'case "$operation" in' '    fetch) [[ "$2" == "--quiet" && "$3" == "origin" ]];;' '    cat-file) [[ "$2" == "-e" && "$3" == "${DEPLOY_TEST_SHA}^{commit}" ]];;' '    merge-base) [[ "$2" == "--is-ancestor" && "$3" == "$DEPLOY_TEST_SHA" && "$4" == "origin/main" ]];;' '    checkout) [[ "$2" == "--quiet" && "$3" == "--force" && "$4" == "$DEPLOY_TEST_SHA" ]];;' '    status) [[ "$2" == "--porcelain" ]];;' '    *) exit 1;;' 'esac' > "$work/bin/git"
+    printf '%s\n' '#!/usr/bin/env bash' 'printf "sudo:%s\n" "$PWD" >> "$DEPLOY_CWD_LOG"' 'printf "/verified/backup.dump\n"' > "$work/bin/sudo"
+    printf '%s\n' '#!/usr/bin/env bash' 'printf "curl:%s\n" "$PWD" >> "$DEPLOY_CWD_LOG"' > "$work/bin/curl"
+    chmod +x "$work/bin/git" "$work/bin/sudo" "$work/bin/curl"
+
+    (
+        cd "$caller"
+        HOME="$caller" PATH="$work/bin:$PATH" DEPLOY_CWD_LOG="$log" DEPLOY_TEST_SHA="$SHA" \
+            "$DEPLOY" --root "$fixture" --sha "$SHA" --php "$php" \
+            --composer "$composer" --backup-helper "$work/backup helper" \
+            --health-url https://health.test >/dev/null
+    )
+    local rc=$?
+    local expected bad_cwd=0 record
+    expected="$(cd "$fixture" && pwd -P)"
+    while IFS= read -r record; do
+        [[ "$record" == *":$expected" ]] || bad_cwd=1
+    done < "$log"
+
+    local expected_record records_ok=1
+    for expected_record in \
+        "git:fetch:$expected" "git:cat-file:$expected" \
+        "git:merge-base:$expected" "git:checkout:$expected" "git:status:$expected" \
+        "php:install:$expected" "php:migrate:$expected" \
+        "php:config:cache:$expected" "php:route:cache:$expected" \
+        "php:event:cache:$expected" "sudo:$expected" "curl:$expected"; do
+        grep -qxF -- "$expected_record" "$log" || records_ok=0
+    done
+    [[ "$(grep -cxF -- "sudo:$expected" "$log")" -eq 3 ]] || records_ok=0
+
+    if [[ $rc -eq 0 && -s "$log" && $bad_cwd -eq 0 && $records_ok -eq 1 ]]; then
+        pass "repository deployment commands use --root from another cwd and HOME"
+    else
+        fail "repository deployment commands use --root from another cwd and HOME" "exit=$rc; $(tr '\n' ' ' < "$log" 2>/dev/null)"
+    fi
+    rm -rf "$work"
 }
 
 t_never_seeds_or_rolls_back() {
@@ -254,9 +321,11 @@ printf '\ndeploy.sh / privileged backup helper\n'
 t_rejects_unsafe_revisions
 t_requires_arguments
 t_rejects_non_git_root
+t_rejects_root_without_composer_manifest
 t_rejects_unknown_argument
 t_dry_run_is_inert_and_ordered
 t_dry_run_uses_explicit_php_84
+t_repository_commands_run_from_validated_root
 t_never_seeds_or_rolls_back
 t_reports_failure_boundary
 t_no_password_in_scripts

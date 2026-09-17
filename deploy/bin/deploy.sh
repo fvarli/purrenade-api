@@ -94,6 +94,16 @@ BOUNDARY='PREFLIGHT'
   A deployment revision must be a full 40-character lowercase Git commit SHA."
 [[ -d "$root" ]] || die "deployment root does not exist: $root"
 [[ -d "$root/.git" ]] || die "not a Git checkout: $root"
+[[ -f "$root/composer.json" ]] || die "not an application checkout (composer.json missing): $root"
+
+# This is the deployment root invariant. The script can arrive through SSH from
+# any login directory, and remote-exec.sh runs it from a transported stream, so
+# its inherited cwd is not meaningful. Canonicalize the validated root and make
+# it the process cwd before *any* repository-relative command (including
+# Composer scripts) can run. Keep explicit git -C calls below as a second,
+# local binding for the checkout operations.
+root="$(cd -- "$root" && pwd -P)"
+cd -- "$root"
 
 if [[ "$dry_run" -eq 0 ]]; then
     # PHP 8.4 by absolute path, never bare `php`. The host's generic PHP is the
