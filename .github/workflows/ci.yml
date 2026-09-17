@@ -18,6 +18,27 @@ env:
   # and PHPUnit 13 (>=8.4.1) make 8.4 the real floor.
   PHP_VERSION: '8.4'
 
+  # Name the environment, from the very first step.
+  #
+  # `composer install` runs `post-autoload-dump`, which runs
+  # `artisan package:discover` — so Laravel BOOTS during dependency
+  # installation, before any step has written a .env. With no .env, every
+  # env() call falls back to its config default, and `config/app.php` defaults
+  # APP_ENV to **production**. EnvironmentGuard then does exactly its job and
+  # refuses to boot, because the mailer is `log` and frontend.url is a
+  # development hostname.
+  #
+  # The guard is right; the workflow was wrong to leave the environment
+  # implicit. This makes it explicit and deterministic everywhere, including
+  # inside Composer's scripts. EnvironmentGuard::enforce() returns immediately
+  # for any non-production environment, so nothing about it is relaxed, no CI
+  # special case is added to it, and production behaviour is unchanged.
+  #
+  # A real process variable also wins over `.env` (Laravel's Dotenv is
+  # immutable), so this one value holds for every step regardless of ordering.
+  # phpunit.xml already sets the same value for the suite itself.
+  APP_ENV: testing
+
 # Every external action is pinned to a full commit SHA, with the release in a
 # trailing comment. A tag is a moving pointer: whoever can move `v2` can run
 # their code in this workflow. The comment is for humans; the SHA is the
@@ -211,8 +232,66 @@ jobs:
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
 
+      # First, because it needs nothing installed: a malformed document fails
+      # here in seconds rather than after the application bootstrap below.
       - name: Validate the OpenAPI document
         run: npx --yes @redocly/cli@latest lint docs/api/openapi.draft.yaml
+
+      # ---------------------------------------------------------------------
+      # Application bootstrap.
+      #
+      # Three of the steps below run `artisan`, and GitHub Actions jobs are
+      # isolated: this job has its own runner, its own filesystem and no
+      # vendor/ directory. Without this, `php artisan route:list` fails with
+      # `vendor/autoload.php: No such file or directory` — which is exactly how
+      # this job broke.
+      #
+      # These five steps duplicate the `app` job deliberately. A composite
+      # action or an artifact hand-off between jobs would hide the bootstrap
+      # this job depends on, and copying a vendor/ directory between unrelated
+      # jobs trades an obvious cost for a non-obvious coupling. The duplication
+      # is visible, and visible is what matters for a gate.
+      #
+      # PostgreSQL is included because "The error envelope holds on the live
+      # application" polls /api/v1/health for readiness, and that endpoint runs
+      # `select 1`. Without a database the probe silently exhausts its retries
+      # and the gate degrades into a slower, weaker check.
+      # ---------------------------------------------------------------------
+      - name: Set up PHP
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
+        with:
+          php-version: ${{ env.PHP_VERSION }}
+          extensions: pdo_pgsql, pgsql, mbstring, xml, curl, zip, bcmath, intl
+          coverage: none
+
+      - name: Start the runner's native PostgreSQL
+        run: |
+          set -euo pipefail
+          if ! command -v pg_ctlcluster >/dev/null && ! command -v pg_isready >/dev/null; then
+            echo "No PostgreSQL on this runner image; installing the distribution package."
+            sudo apt-get update -qq
+            sudo apt-get install -y --no-install-recommends postgresql postgresql-client
+          fi
+          sudo systemctl start postgresql
+          for _ in $(seq 1 30); do pg_isready -h 127.0.0.1 -p 5432 && break; sleep 1; done
+
+      - name: Create the throwaway test role and database
+        run: |
+          set -euo pipefail
+          sudo -u postgres psql -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE ROLE purrenade LOGIN PASSWORD 'ci-only-not-a-secret';
+          CREATE DATABASE purrenade OWNER purrenade;
+          SQL
+
+      - name: Install from the lockfile
+        run: composer install --prefer-dist --no-interaction --no-progress
+
+      - name: Prepare the environment
+        run: |
+          cp .env.example .env
+          php artisan key:generate
+        env:
+          DB_PASSWORD: ci-only-not-a-secret
 
       - name: Every route must exist in the contract
         run: |
@@ -274,6 +353,8 @@ jobs:
 
           print(f'all {len(routes)} registered route(s) present in the contract')
           EOF
+        env:
+          DB_PASSWORD: ci-only-not-a-secret
 
       - name: The error envelope holds on the live application
         run: |
@@ -314,6 +395,8 @@ jobs:
 
           [ "$failed" -eq 0 ] || exit 1
           echo 'every path on the host answers with one envelope and no internals'
+        env:
+          DB_PASSWORD: ci-only-not-a-secret
 
       - name: One error envelope, no exceptions
         run: |

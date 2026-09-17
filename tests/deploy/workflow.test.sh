@@ -128,5 +128,67 @@ if 'health-check.sh' not in rb: fail('rollback does not re-verify health')
 if '::error::' not in rb: fail('rollback does notreport failure loudly')"
 fi
 
+# --- PHP CI lifecycle -------------------------------------------------------
+#
+# Regression coverage for the two defects that broke the push CI at fb9d1b7.
+# Guarded on composer.json so the frontend copy of this file stays a valid
+# no-op rather than drifting into a second implementation.
+#
+# Both assertions compare step POSITIONS inside the parsed workflow, not
+# command text. Renaming a step or reordering a job cannot make them pass
+# vacuously, and neither can a comment that merely mentions composer.
+if [[ -f "$ROOT_DIR/composer.json" ]]; then
+
+check "every job that runs artisan installs dependencies first" "$PRELUDE
+# DEFECT 2: the OpenAPI job ran 'php artisan route:list' from a bare checkout.
+# GitHub jobs are isolated, so it had no vendor/ and died on
+# 'vendor/autoload.php: No such file or directory'.
+for name, d in WF.items():
+    for jn, job in d['jobs'].items():
+        steps = job['steps']
+        artisan = [i for i, s in enumerate(steps) if 'artisan' in (s.get('run') or '')]
+        if not artisan: continue
+        install = [i for i, s in enumerate(steps) if 'composer install' in (s.get('run') or '')]
+        if not install:
+            fail(name + '::' + jn + ' runs artisan at step ' + str(artisan[0]) + ' but never installs dependencies')
+        if min(install) > min(artisan):
+            fail(name + '::' + jn + ' runs artisan at step ' + str(min(artisan)) +
+                 ' before composer install at step ' + str(min(install)))"
+
+check "composer install always has an explicit non-production APP_ENV" "$PRELUDE
+# DEFECT 1: composer install triggers post-autoload-dump -> artisan
+# package:discover, so Laravel BOOTS during installation. With no .env yet,
+# config/app.php defaults APP_ENV to 'production' and EnvironmentGuard
+# correctly refuses to boot. The environment must be named, not implied.
+for name, d in WF.items():
+    for jn, job in d['jobs'].items():
+        if not any('composer install' in (s.get('run') or '') for s in job['steps']): continue
+        env = dict(d.get('env') or {}); env.update(job.get('env') or {})
+        value = env.get('APP_ENV')
+        if value is None:
+            fail(name + '::' + jn + ' runs composer install with no explicit APP_ENV')
+        if value == 'production':
+            fail(name + '::' + jn + ' runs composer install under APP_ENV=production')"
+
+check "the OpenAPI contract job bootstraps before its route gate" "$PRELUDE
+steps = WF['ci.yml']['jobs']['contract']['steps']
+def first(needle):
+    for i, s in enumerate(steps):
+        if needle in (s.get('run') or ''): return i
+    return None
+install, routes = first('composer install'), first('route:list')
+if install is None: fail('the contract job never installs dependencies')
+if routes is None: fail('the contract job no longer runs route:list — has the gate been removed?')
+if install > routes: fail('composer install (step ' + str(install) + ') comes after route:list (step ' + str(routes) + ')')"
+
+check "CI never carries a production environment or a secret" "$PRELUDE
+raw = RAW['ci.yml']
+if 'secrets.' in raw: fail('ci.yml references a secret')
+for jn, job in WF['ci.yml']['jobs'].items():
+    if 'environment' in job: fail('ci.yml::' + jn + ' is attached to a deployment environment')
+if re.search(r'APP_ENV:\s*.?production', raw): fail('ci.yml sets APP_ENV=production')"
+
+fi
+
 printf '\n  %d passed, %d failed\n\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]
