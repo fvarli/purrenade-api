@@ -86,10 +86,9 @@ open parameters resolved. See
 ## Production (`docs/production/`)
 
 How the API actually runs on the production host, and the procedure for changing
-it. The controlled deployment pipeline and the manual fallback are documented
-here. **OPS-3 remains OPEN** until a controlled automated deployment completes
-successfully; an attempted run alone does not close it. The frontend half of this
-documentation lives in
+it. The controlled production deployment path has been proven end-to-end;
+**OPS-3 is COMPLETE**. The manual procedure remains the fallback. The frontend
+half of this documentation lives in
 [`purrenade/docs/production/`](https://github.com/fvarli/purrenade/tree/main/docs/production).
 
 | Document | Contents |

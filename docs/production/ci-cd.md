@@ -6,12 +6,11 @@ operator-managed contract it depends on.
 Deploying by hand is [deployment.md](deployment.md); that procedure is what this
 pipeline automates, and it remains the fallback when the pipeline is unavailable.
 
-> The deployment pipeline has been exercised against production. It remains a
-> controlled, manual operation: a failed run is not a successful deployment
-> merely because the checkout advanced or health happens to be green. Use the
-> reported failure boundary and complete the remaining sequence deliberately.
-> **OPS-3 remains OPEN** until a controlled automated deployment completes
-> successfully.
+> The controlled production deployment path has been proven end-to-end.
+> **OPS-3 is COMPLETE.** Deployment remains a controlled, manual operation: a
+> failed run is not a successful deployment merely because the checkout advanced
+> or health happens to be green. Use the reported failure boundary and complete
+> the remaining sequence deliberately.
 
 ---
 
