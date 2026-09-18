@@ -176,7 +176,7 @@ and is not a Purrenade health endpoint.
 | --- | --- | --- |
 | 1 | **PostgreSQL 16.15 in production; the project target is 18.x** | A known, accepted deviation. The target is **not** rewritten to 16. A dedicated PG18 compatibility gate lands before database-sensitive product work at M9. |
 | 2 | Backend deployment is in-place rather than release-directory based; the controlled production deployment path has been proven end-to-end | Preserve the documented failure-boundary and recovery model. **OPS-3 is COMPLETE**; manual deployment remains the fallback. |
-| 3 | Reboot-survival not yet verified | Units are enabled; a controlled restart drill is outstanding (OPS-5) |
+| 3 | Restart/reboot survival and manual resource baseline | **OPS-5 is complete:** a controlled reboot proved automatic recovery of the API runtime and queue, with health, database, migrations and queue state healthy afterwards. The frontend-owned BFF filesystem session store also preserved an existing authenticated browser session. The verified manual baseline is run after controlled restart, monthly and on symptoms; see the [frontend operations procedure](https://github.com/fvarli/purrenade/blob/main/docs/production/operations.md#8-restart-reboot-and-resource-monitoring). |
 | 4 | One queue worker, database driver | Correct at this volume; revisit with queue depth (QJ-*) |
 
 CI also runs against a PostgreSQL older than the target and records the gap
@@ -189,6 +189,11 @@ not be collapsed into one vendor decision: **operational observability** (logs,
 health, queue depth — what exists today), **product analytics** (registrations,
 verified registrations, logins, retention), and **gameplay telemetry** (runs,
 score distribution, Paw Tokens, Loli and SLAYYY activations).
+
+OPS-5 provides only the verified **manual** resource baseline in the
+[frontend operations procedure](https://github.com/fvarli/purrenade/blob/main/docs/production/operations.md#8-restart-reboot-and-resource-monitoring).
+Scheduled monitoring, alerting, dashboards, log aggregation and analytics are
+not implied by that baseline and remain part of OPS-4.
 
 **Server-authoritative gameplay facts are not client analytics events.** Scores
 that decide a leaderboard cannot share a channel with UI events; the anti-cheat
