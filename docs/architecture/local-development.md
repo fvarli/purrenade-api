@@ -1,6 +1,8 @@
 # Local Development
 
-The API runs natively behind Nginx with trusted local HTTPS. **No Docker.**
+The API runs natively behind Nginx with trusted local HTTPS. The application is
+not Dockerized; the sole local Docker dependency is Mailpit, which captures
+development email on loopback.
 
 ```
   https://api.purrenade.test  →  native Nginx (TLS)  →  http://127.0.0.1:8410
@@ -12,6 +14,8 @@ The API runs natively behind Nginx with trusted local HTTPS. **No Docker.**
 - **Native PostgreSQL** — see the version note in `versions-and-runtime.md`.
 - **Nginx** with an mkcert certificate for `api.purrenade.test`.
 - Hostname resolving to loopback: `127.0.0.1 api.purrenade.test`.
+- **Mailpit** for local application email capture (SMTP `127.0.0.1:2525`; web
+  inbox `http://127.0.0.1:8025`).
 
 ## Two ways to run it
 
@@ -62,7 +66,8 @@ running — the launcher says so and starts nothing.
 ## What is always running, and what is not
 
 **Nginx and PostgreSQL are persistent system services** — you never start or stop them per
-session, and neither the unit nor the launcher touches them.
+session, and neither the unit nor the launcher touches them. Mailpit is separate
+local Docker infrastructure; it does not Dockerize the application.
 
 **The Laravel dev server is not persistent in the same way.** In the foreground it dies with your
 terminal; as a user service it dies with your session.
@@ -114,30 +119,37 @@ and runs a worker, with no code change.
 > `phpunit.xml` sets `sync` — so it only shows up in a real browser. It is
 > called out in `.env.example` for that reason.
 
-`MAIL_MAILER=log`, so mail is written to `storage/logs/laravel.log` rather than
-sent. No SMTP server, no Docker, and **M2 depends on no purchased provider**.
+Mailpit is the canonical local mail workflow. `.env.example` configures Laravel
+to send SMTP mail to `127.0.0.1:2525` with `MAIL_MAILER=smtp`,
+`MAIL_SCHEME=null`, and null credentials. Mailpit captures that mail in its web
+inbox at `http://127.0.0.1:8025`; it is local development infrastructure, not a
+production delivery service. `MAIL_MAILER=log` is no longer the canonical local
+setup.
 
-### Reading a verification code
-
-```bash
-# The plain-text part of the mail renders the code on a line of its own.
-# `tr -d '\r'` matters: a MIME message uses CRLF, so an anchored `$` will not
-# match a line that ends "123456\r".
-tail -200 storage/logs/laravel.log | tr -d '\r' | grep -aoE '^[0-9]{6}$' | tail -1
-```
-
-### Reading a password-reset link
+The existing container is named `purrenade-mailpit`. Starting it is idempotent:
 
 ```bash
-# Quoted-printable wraps long lines with a trailing `=`; unfold before matching.
-tail -200 storage/logs/laravel.log | tr -d '\r' \
-  | sed ':a;/=$/{N;s/=\n//;ba}' \
-  | grep -aoE 'https://purrenade\.test/auth/reset-password\?[^ "<]*' | tail -1
+docker start purrenade-mailpit
 ```
 
-Do not truncate the log while the service is running: it holds the file open, and
-truncating leaves it NUL-padded up to the writer's offset, after which `grep`
-treats it as binary. Record a byte offset and read forward instead.
+If it has not been created on a machine yet, create it once with loopback-only
+bindings:
+
+```bash
+docker run -d \
+  --name purrenade-mailpit \
+  --restart unless-stopped \
+  -p 127.0.0.1:2525:1025 \
+  -p 127.0.0.1:8025:8025 \
+  axllent/mailpit
+```
+
+### Inspecting application email
+
+Open `http://127.0.0.1:8025` to inspect the six-digit registration-verification
+code and password-reset link, as well as other application email. Registration
+verification has been verified end-to-end through this setup. Because
+`QUEUE_CONNECTION=sync`, these local notifications need no separate queue worker.
 
 ## Security events
 

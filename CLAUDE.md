@@ -2,6 +2,9 @@
 
 Read this before making any change in this repository.
 
+Before changing local infrastructure or developer configuration, read
+`docs/architecture/local-development.md`.
+
 ## What this repository is
 
 The Laravel/PostgreSQL REST API for Purrenade. It is the **authoritative

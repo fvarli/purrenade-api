@@ -11,8 +11,9 @@ score-attack runner. Laravel · PostgreSQL.
 
 ## Local setup
 
-Requires **PHP 8.4** and a **native PostgreSQL** server. **No Docker** — this project does not
-use containers in local development.
+Requires **PHP 8.4** and a **native PostgreSQL** server. The application itself runs natively;
+the only local Docker infrastructure is Mailpit for captured development email. See
+[`docs/architecture/local-development.md`](docs/architecture/local-development.md).
 
 The system default `php` on a developer machine may be an older version, so **every command
 names the runtime explicitly**:
