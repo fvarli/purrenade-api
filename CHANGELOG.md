@@ -6,6 +6,47 @@ This project does not yet have released versions.
 
 ## [Unreleased]
 
+### Added — M8: the tutorial is finished once, not once per device
+
+One endpoint, one column, and deliberately nothing else. A player who has completed or
+skipped the first-run tutorial should not meet it again because they refreshed, opened
+another browser, or signed in on a phone — so completion is the account's fact, not the
+device's.
+
+- **`POST /api/v1/progression/tutorial`** — the endpoint the contract has described as
+  APPROVED since M0, now implemented. It takes **no request body**: the actor is the
+  bearer of the token, so there is no id to supply and no way to aim it at another
+  account. Unaimable by construction rather than by a check somebody could forget.
+- **Idempotent, structurally.** The write is a conditional
+  `UPDATE … WHERE tutorial_completed_at IS NULL` whose affected-row count is the
+  authority, so replaying the tutorial from Settings, a double submit and a network retry
+  are all the same no-op. Reading the column and then writing it would be the lost-update
+  bug the display-name cooldown was fixed for.
+- **Skipping and finishing are the same call.** The product counts a skipped tutorial as
+  completed, and which one happened is not a fact this API has any use for. Recording it
+  would be tutorial telemetry — there is no completion count, no failure count, no
+  duration and no per-lesson data, by choice.
+- **The timestamp stays on the server.** `users.tutorial_completed_at` is the stored
+  fact; what crosses the wire is the boolean derived from it, on `TutorialState` and as a
+  read projection on `/auth/me`. **When** a player finished is not a decision any client
+  makes differently, and a date in the browser would be analytics nobody asked for.
+- **Verified, not merely authenticated** — a deliberate narrowing of the contract's
+  "authenticated" row, recorded in `docs/api/endpoints/progression.md` so the route and
+  the document cannot drift. The unverified tier is exactly four endpoints by design.
+
+**Where the column lives, and where it is going.** Progression still owns tutorial
+completion; `domain-boundaries.md` §4 is unchanged. The column sits on `users` only
+because `player_progression` does not exist yet — it is PROPOSED, and every other column
+in it is derived from accepted run submissions, which is M9 scope and blocked on
+ADR-0006. `tutorial_completed_at` is the one row in that table with no verification
+source. `docs/architecture/data-model.md` §4.1 records the M9 relocation **including the
+backfill**, because skipping that would ask every existing player to repeat a tutorial
+they had already finished — the precise failure server-side persistence exists to prevent.
+
+**What did not change:** no gameplay, no scoring, no paw ledger, no leaderboard, no
+authentication or session behaviour. *Tutorial runs are not runs* — the tutorial submits
+nothing, and no endpoint exists by which a client could add to progression.
+
 ### Added — M7.1 (delivery label): safe initial administrator bootstrap
 
 Production-readiness work, backend only. No gameplay, authentication or contract change;

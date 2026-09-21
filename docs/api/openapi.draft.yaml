@@ -1098,13 +1098,33 @@ paths:
         reinstall. Replaying the tutorial from Settings does not clear or
         re-stamp it. The tutorial affects no score, leaderboard, or progression
         data.
+
+        **Implemented at M8.** Two details the table above cannot express:
+
+        - **Requires a verified address**, not merely a session. The API's
+          unverified tier is exactly four endpoints by design, and the tutorial
+          sits behind the frontend's `verified` guard, so an unverified caller
+          could never legitimately reach this. A deliberate narrowing of the
+          "authenticated" row, recorded here so the route and the contract
+          cannot drift.
+        - **Takes no request body.** The actor is the bearer of the token, so
+          there is no id to supply and no way to aim this at another account.
+          Skipping and finishing are the same call: the product counts a skipped
+          tutorial as completed, and the difference is not a fact the API has
+          any use for.
+
+        Idempotent without an `Idempotency-Key`: the write is a conditional
+        `UPDATE ... WHERE tutorial_completed_at IS NULL`, so a replay is a no-op
+        by construction rather than by bookkeeping.
       responses:
         '200':
-          description: Tutorial completion recorded.
+          description: Tutorial completion recorded, or already recorded.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/TutorialState' }
         '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '429': { $ref: '#/components/responses/RateLimited' }
 
   /leaderboards:
     get:
@@ -1635,6 +1655,18 @@ components:
         role: { type: string, enum: [player, admin] }
         email_verified: { type: boolean }
         email_verified_at: { type: [string, 'null'], format: date-time }
+        tutorial_completed:
+          type: boolean
+          description: |
+            Whether the first-run tutorial has been completed or skipped.
+
+            A **read projection**, added at M8 for first-run routing only.
+            Progression still owns this fact and `POST /progression/tutorial` is
+            still the only way to change it — this endpoint cannot. It rides
+            along here because the decision it feeds ("where does PLAY go") is
+            made during server-side render, before a page could ask a second
+            endpoint, and a separate round trip would buy a boundary the write
+            path already enforces at the cost of a loading flash on every visit.
         two_factor_enabled:
           type: boolean
           description: |
@@ -1676,6 +1708,7 @@ components:
         - email
         - role
         - email_verified
+        - tutorial_completed
         - two_factor_enabled
         - two_factor_pending
         - two_factor_recovery_codes_remaining
@@ -2113,20 +2146,28 @@ components:
         lifetime_near_misses: { type: integer, description: 'Derived from accepted run telemetry. Feeds near-miss achievements. DERIVED_TELEMETRY source, persisted aggregate.' }
         lifetime_lane_blocking_passes: { type: integer, description: 'Derived from accepted run telemetry. Feeds cone_dodger. DERIVED_TELEMETRY source, persisted aggregate.' }
         lifetime_slayyy_activations: { type: integer, description: 'Derived from accepted run telemetry. Feeds SLAYYY achievements. DERIVED_TELEMETRY source, persisted aggregate.' }
-        tutorial_completed_at:
-          oneOf:
-            - type: string
-              format: date-time
-            - type: 'null'
-          description: First tutorial completion; null until completed.
+        tutorial_completed:
+          type: boolean
+          description: |
+            Whether the first-run tutorial has been completed or skipped.
+
+            Derived from the stored `tutorial_completed_at`, which stays on the
+            server. See `TutorialState`.
       required: [lifetime_paws, loli_cycle_paws, loli_threshold, best_score, run_count]
 
     TutorialState:
       type: object
-      description: Tutorial completion state, persisted to the profile.
+      description: |
+        Tutorial completion state, persisted to the player profile.
+
+        The stored fact is `tutorial_completed_at`, a nullable timestamp still
+        owned by Progression. What crosses the wire is the boolean derived from
+        it: **when** a player finished is not a decision any client makes
+        differently, so sending the date would put tutorial telemetry in the
+        browser for no purpose. Implemented at M8.
       properties:
-        tutorial_completed_at: { type: string, format: date-time, description: Completion timestamp. }
-      required: [tutorial_completed_at]
+        tutorial_completed: { type: boolean, description: Whether the tutorial has been completed or skipped. }
+      required: [tutorial_completed]
 
     LeaderboardPage:
       type: object

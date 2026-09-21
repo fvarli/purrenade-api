@@ -2,10 +2,17 @@
 
 **Contract shape only.**
 
-| Method | Path | Auth | Idempotent | Rate-limit class |
-| --- | --- | --- | --- | --- |
-| GET | `/progression` | authenticated | — | normal |
-| POST | `/progression/tutorial` | authenticated | yes | normal |
+| Method | Path | Auth | Idempotent | Rate-limit class | Status |
+| --- | --- | --- | --- | --- | --- |
+| GET | `/progression` | authenticated | — | normal | Contract only — needs M9's run-derived counters |
+| POST | `/progression/tutorial` | authenticated **+ verified** | yes | normal | **Implemented at M8** |
+
+**The verified requirement is a deliberate narrowing, recorded here so the route
+and this table cannot drift.** The API's unverified tier is exactly four
+endpoints by design — enough to learn that verification is required, complete
+it, and leave — and the tutorial sits behind the frontend's `verified` guard, so
+an unverified caller could never legitimately reach it. Admitting a fifth
+endpoint to that tier would cost more than the row it satisfies.
 
 ---
 
@@ -38,7 +45,7 @@ a future-run entitlement. See the frontend's `docs/product/scoring-and-progressi
 
 ---
 
-## Record tutorial completion — APPROVED
+## Record tutorial completion — APPROVED · implemented at M8
 
 | Rule | Detail |
 | --- | --- |
@@ -47,8 +54,55 @@ a future-run entitlement. See the frontend's `docs/product/scoring-and-progressi
 | Replaying the tutorial from Settings does **not** clear it | Completion is a one-time fact |
 | No score, leaderboard, or progression side effects | The tutorial is not a run |
 
-**OPEN (TU-3):** whether the paw collected during the tutorial counts toward
-progression. **PROPOSED: it does not**, so the tutorial cannot be farmed.
+**Request:** no body. The actor is the bearer of the token, so there is no id to
+supply and no way to aim this at another account — the endpoint is unaimable by
+construction rather than by a check somebody could forget to write. Any body
+sent is ignored; `$guarded = ['*']` means the model has no mass-assignable
+attribute to reach even if it were not.
+
+**Response:** `TutorialState` — `{"data": {"tutorial_completed": true}}`.
+
+**Skipping and finishing are the same call.** The product counts a skipped
+tutorial as completed for first-run routing, and which one happened is not a
+fact this API has any use for. Recording the difference would be tutorial
+telemetry, which M8 deliberately does not collect: no completion count, no
+failure count, no duration, no per-lesson data.
+
+### How idempotence is enforced
+
+A conditional update whose affected-row count is the authority:
+
+```sql
+UPDATE users SET tutorial_completed_at = now() WHERE id = ? AND tutorial_completed_at IS NULL
+```
+
+Zero rows means it was already completed, which is the ordinary replay case and
+returns `200` with the stored state. Reading the column and then writing it
+would be the defect the display-name cooldown was fixed for: two concurrent
+requests both see null, both stamp, and the second silently overwrites the
+first.
+
+### Where the column lives — and where it is going
+
+The stored fact is **`users.tutorial_completed_at`**, a nullable timestamp.
+
+**Progression still owns it.** `domain-boundaries.md` §4 is unchanged. What M8
+chose is only the *physical* location, and it chose `users` because
+`player_progression` does not exist yet: it is PROPOSED in
+[`../../architecture/data-model.md`](../../architecture/data-model.md) §4, and
+every other column in it is derived from accepted run submissions — M9 scope,
+blocked on ADR-0006. `tutorial_completed_at` is also the only row in that table
+with no verification source.
+
+**This placement is temporary.** When M9 creates `player_progression`, the
+intended migration is `users.tutorial_completed_at` →
+`player_progression.tutorial_completed_at`, backfilling every existing value so
+no player is asked to repeat a tutorial they already finished. Recorded in
+`data-model.md` §4 as well, so it cannot be quietly forgotten.
+
+**TU-3 is resolved:** the paw collected during the tutorial does **not** count
+toward progression. It cannot: the tutorial submits nothing, and no endpoint
+exists by which a client could add to the paw ledger.
 
 ---
 

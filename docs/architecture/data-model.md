@@ -144,10 +144,43 @@ One row per user.
 | `lifetime_near_misses` | **`DERIVED_TELEMETRY`** | Feeds `close_call` |
 | `lifetime_lane_blocking_passes` | **`DERIVED_TELEMETRY`** | Feeds `cone_dodger` |
 | `lifetime_slayyy_activations` | **`DERIVED_TELEMETRY`** | Feeds `slayyy_master` |
-| `tutorial_completed_at` | — | Null until first completion; **not** re-stamped on replay |
+| `tutorial_completed_at` | — | Null until first completion; **not** re-stamped on replay. **Lives on `users` until M9** — see §4.1 |
 
 Every column here is a **`PERSISTED_AGGREGATE`** by progress persistence. The Verification
 Source column records something different — where the *evidence* came from.
+
+### 4.1 `tutorial_completed_at` is on `users` until M9 — APPROVED (M8)
+
+The table above is still where this column **belongs**: Progression owns tutorial
+completion ([`domain-boundaries.md`](domain-boundaries.md) §4), and M8 did not change
+that. What M8 chose is where the column physically sits until `player_progression`
+actually exists.
+
+**Why not create the table at M8.** `player_progression` is PROPOSED, and every other
+column in it is derived from accepted run submissions — M9 scope, blocked on ADR-0006.
+Creating it to hold one unrelated column would be implementing a proposed design early,
+and would invite the rest of it to be filled in piecemeal by whoever needed the next
+field. `tutorial_completed_at` is also the only row in the table with **no verification
+source**: it is not derived from a run, and it needs none of the machinery the other
+columns exist for.
+
+So M8 added it to `users`, beside `display_name_changed_at`, which is the same shape —
+a nullable timestamp on the player's own row, written by naming the column explicitly
+because `$guarded = ['*']` disables mass assignment outright.
+
+**The M9 migration, recorded now so it is not forgotten later:**
+
+| Step | Action |
+| --- | --- |
+| 1 | Create `player_progression` with its full approved column set, including `tutorial_completed_at` |
+| 2 | **Backfill** `player_progression.tutorial_completed_at` from `users.tutorial_completed_at` for every row, preserving the original timestamp |
+| 3 | Repoint the write in `TutorialController` and the read projection in `AuthenticatedUserResource` |
+| 4 | Drop `users.tutorial_completed_at` only once the backfill is verified |
+
+Skipping the backfill would ask every existing player to sit through a tutorial they
+have already completed — the precise failure server-side persistence exists to prevent.
+The relocation is a physical move; **it does not change ownership**, and no product
+decision is reopened by it.
 
 **Naming rule — APPROVED.** A counter whose evidence comes from telemetry keeps a
 `DERIVED_TELEMETRY` verification source even though it is stored as a persistent aggregate.

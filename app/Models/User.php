@@ -24,6 +24,7 @@ use Laravel\Sanctum\HasApiTokens;
  * @property string $display_name
  * @property string $display_name_normalized
  * @property Carbon|null $display_name_changed_at
+ * @property Carbon|null $tutorial_completed_at
  * @property string $email
  * @property Carbon|null $email_verified_at
  * @property string $password
@@ -76,6 +77,7 @@ class User extends Authenticatable implements MustVerifyEmailContract
         return [
             'email_verified_at' => 'datetime',
             'display_name_changed_at' => 'datetime',
+            'tutorial_completed_at' => 'datetime',
             'two_factor_confirmed_at' => 'datetime',
             'two_factor_last_used_timestep' => 'integer',
             'two_factor_version' => 'integer',

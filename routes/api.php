@@ -13,6 +13,7 @@ use App\Http\Controllers\Auth\SessionStateController;
 use App\Http\Controllers\Auth\TwoFactorChallengeController;
 use App\Http\Controllers\Auth\TwoFactorController;
 use App\Http\Controllers\HealthController;
+use App\Http\Controllers\Progression\TutorialController;
 use App\Support\RateLimits;
 use Illuminate\Support\Facades\Route;
 
@@ -173,6 +174,28 @@ Route::prefix('v1')->group(function (): void {
         Route::patch('/profile', [ProfileController::class, 'updateDisplayName'])
             ->middleware('throttle:'.RateLimits::DISPLAY_NAME)
             ->name('profile.update');
+
+        /*
+         * The first-run tutorial is finished — or skipped, which the product
+         * counts as the same thing and the server is deliberately not told
+         * apart.
+         *
+         * **Verified, not merely authenticated.** The contract table says
+         * "authenticated", and placing it here is a deliberate, documented
+         * narrowing rather than a drift: the unverified tier above is exactly
+         * four endpoints by design, and the tutorial itself sits behind the
+         * frontend's `verified` guard, so an unverified caller could never
+         * legitimately reach it. Admitting a fifth endpoint to that tier would
+         * cost more than the contract row it satisfies.
+         * `docs/api/endpoints/progression.md` records the same narrowing, so
+         * the route and the document cannot disagree.
+         *
+         * No `Idempotency-Key`: the controller's conditional UPDATE makes a
+         * replay a no-op by construction, rather than by bookkeeping.
+         */
+        Route::post('/progression/tutorial', [TutorialController::class, 'complete'])
+            ->middleware('throttle:'.RateLimits::NORMAL)
+            ->name('progression.tutorial');
 
         /*
         |------------------------------------------------------------------

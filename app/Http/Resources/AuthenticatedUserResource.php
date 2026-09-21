@@ -46,6 +46,20 @@ final class AuthenticatedUserResource extends JsonResource
             'email_verified' => $user->email_verified_at !== null,
             'email_verified_at' => $user->email_verified_at?->toIso8601String(),
 
+            /*
+             * A read projection, for first-run routing only.
+             *
+             * Progression still owns tutorial completion — it is written only
+             * through `POST /progression/tutorial`, and this endpoint cannot
+             * change it. It rides along here because the decision it feeds is
+             * "where does PLAY go", which the frontend has to make during
+             * server-side render, before any page has had a chance to ask a
+             * second endpoint. A separate `GET /progression` round trip would
+             * buy a boundary the write path already enforces, and pay for it
+             * with a loading flash on every visit.
+             */
+            'tutorial_completed' => $user->tutorial_completed_at !== null,
+
             'two_factor_enabled' => $user->hasTwoFactorEnabled(),
             'two_factor_pending' => $user->hasTwoFactorPending(),
 
