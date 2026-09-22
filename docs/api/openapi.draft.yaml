@@ -10,11 +10,20 @@ info:
     Every operation says which it is, and a CI gate fails the build if a
     registered route is missing from this document.
 
-    Implemented: the root and readiness routes, and the whole authentication and
-    access surface. Not yet implemented: run lifecycle and progression (M9,
-    blocked on ADR-0006), leaderboards (M10), achievements and characters (M11),
-    profile beyond the display name, account deletion (SEC-3), and the admin
-    capabilities (M13). This document is not generated from code.
+    Implemented: the root and readiness routes, the whole authentication and
+    access surface, and `POST /progression/tutorial` (M8). Not yet implemented:
+    the run lifecycle and `GET /progression` (M9 — **no longer blocked**;
+    ADR-0006 was accepted on 2026-09-22), leaderboards (M10), achievements and
+    characters (M11), profile beyond the display name, account deletion (SEC-3),
+    and the admin capabilities (M13). This document is not generated from code.
+
+    One consequence of ADR-0006 is visible throughout the run and progression
+    schemas: the four `DERIVED_TELEMETRY` facts — near misses, obstacle passes
+    by class, SLAYYY activations and actual Loli activations — cannot be
+    established by the layers that ship in v1, and the approved authority rule
+    forbids adopting the client's own count. They are therefore **not returned
+    and not persisted at M9**, and the fields that carry them are marked so.
+    Tracked as **ANTI-6**, which blocks M11 only.
 
     Authoritative product behavior lives in the frontend repository's
     Product/Game Specification (`purrenade/docs/product/`). Conventions for
@@ -40,11 +49,17 @@ info:
     - **Loli Bonus queueing is run-scoped.** There is deliberately **no owed/queued Loli
       field** in `Progression`.
 
+    - **Run validation and anti-cheat — APPROVED (ADR-0006, 2026-09-22).** Runs are
+      server-started with a server-issued seed and a server-owned lifecycle; there is no
+      separate run token; at most one active run per user; three outcomes, of which only
+      `accepted` mutates anything; and telemetry retention resolved toward minimization —
+      no raw per-event history is kept.
+
     **Still open:**
 
-    - **ADR-0006** — run validation / anti-cheat boundary. Whether a run is server-started,
-      whether the seed is server-issued, and *what form* validated telemetry retention
-      takes are open — but that *some* retention exists is now required.
+    - **ANTI-6** — the four `DERIVED_TELEMETRY` run facts have no verification source while
+      Layer 3 replay is deferred, so they are neither persisted nor returned. Blocks M11
+      only. Fields that carry them are marked `NOT AT M9 (ANTI-6)`.
 
     Decision status is marked inline as APPROVED, PROPOSED, or OPEN.
   contact:
@@ -1005,24 +1020,45 @@ paths:
       operationId: startGameRun
       summary: Start a run
       description: |
-        **OPEN (ADR-0006).** Whether runs are started server-side at all depends
-        on the validation model and on whether runs are playable offline (PWA-1).
+        **APPROVED (ADR-0006, accepted 2026-09-22).** The run is created
+        server-side before gameplay begins, which is what makes Layer 2
+        possible: a server-recorded start time, a server-issued RNG seed, and an
+        opaque run identity a finish call must reference.
 
-        If adopted, this issues a run token, a server-controlled RNG seed, and a
-        server-recorded start time, which bounds run duration and spawn sequence
-        against server-observed reality.
+        There is **no run token**. The run is identified by its opaque `run_id`
+        and bound to the authenticated actor, whose identity is resolved from
+        the credential and never from the body.
+
+        **A run requires connectivity to start (PWA-1).** Once started, a
+        transient connectivity loss does not destroy it: the player continues
+        locally and retries the finish under the same idempotency identity.
+
+        **At most one active run per user (GR-4)**, enforced by a database
+        constraint. Calling this while an active run exists returns `200` with
+        that same run — same `run_id`, `seed` and `started_at` — rather than
+        creating a second one. That is also how a client recovers after losing
+        its local state.
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: '#/components/schemas/StartRunRequest' }
       responses:
+        '200':
+          description: |
+            An active run already existed; it is returned unchanged. Deterministic
+            resume, not a new run.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StartedRun' }
         '201':
           description: Run started.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/StartedRun' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
         '429': { $ref: '#/components/responses/RateLimited' }
 
   /game-runs/{runId}/finish:
@@ -1031,17 +1067,39 @@ paths:
       operationId: finishGameRun
       summary: Submit a run result
       description: |
-        APPROVED in principle; validation model OPEN (ADR-0006).
+        **APPROVED (ADR-0006, accepted 2026-09-22).**
 
         **Idempotent.** Requires an `Idempotency-Key`; a repeat with the same key
-        returns the original response and performs no further work.
+        and the same effective request returns the original response and performs
+        no further work. The identity lives with the durable run history and
+        **never expires**, so a late retry can never apply progression twice. A
+        `429` does not consume the slot.
 
         The client **proposes**; the server **decides**. The response carries the
         authoritative score and the resulting progression, and the client
         displays those values rather than its own.
 
+        The run must be `active` and owned by the authenticated actor. Finishing
+        one that is not is a lifecycle violation, not a low score.
+
+        **Outcomes.** `status` is one of `accepted`, `flagged` or `rejected`.
+        Only `accepted` mutates anything: a `flagged` or `rejected` run touches
+        no progression, no paw ledger, no personal best, no accepted run count
+        and no leaderboard eligibility, and the player is told honestly. A
+        rejection is never silently converted into an acceptance or a flag, and
+        a flag is never automatically promoted later.
+
+        **Rejecting versus flagging (ANTI-4).** Only impossibilities provable
+        without an unresolved tuning value may reject — malformed requests,
+        identity and ownership violations, impossible lifecycle transitions, and
+        structurally impossible values. Plausibility anomalies whose bounds
+        depend on still-PROPOSED tuning may only **flag**. A legitimate player's
+        run is never rejected on an unresolved tuning number.
+
         Accepted runs update the run record, the paw ledger, achievement progress
-        and character unlocks **in one transaction**.
+        and character unlocks **in one transaction**. At M9 the last two are
+        inert: achievements and unlocks arrive at M11, and several of the
+        counters they need are blocked on ANTI-6.
       parameters:
         - name: runId
           in: path
@@ -1060,12 +1118,22 @@ paths:
             schema: { $ref: '#/components/schemas/FinishRunRequest' }
       responses:
         '200':
-          description: Run result recorded. The returned values are authoritative.
+          description: |
+            Run result recorded. The returned values are authoritative. This is
+            also the response for a `rejected` run: a well-formed submission that
+            is structurally impossible is answered honestly with an outcome, not
+            hidden behind a 4xx.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/RunResult' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
         '409':
-          description: The same idempotency key was used with a different request body.
+          description: |
+            The same idempotency key was used with a different effective request,
+            or the run is not in a state that can be finished. Zero side effects
+            either way.
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/Problem' }
@@ -1080,6 +1148,11 @@ paths:
       description: |
         APPROVED. Returns the three distinct paw counters and derived progress.
         There is no generic `paws` field.
+
+        **Not implemented; built at M9**, which creates `player_progression` and
+        moves `tutorial_completed_at` onto it from `users`. The four `lifetime_*`
+        `DERIVED_TELEMETRY` counters are not part of the M9 column set — see
+        `Progression` and ANTI-6.
       responses:
         '200':
           description: Current progression.
@@ -1099,7 +1172,8 @@ paths:
         re-stamp it. The tutorial affects no score, leaderboard, or progression
         data.
 
-        **Implemented at M8.** Two details the table above cannot express:
+        **Implemented at M8**, and the only progression endpoint that is. Two
+        details the table above cannot express:
 
         - **Requires a verified address**, not merely a session. The API's
           unverified tier is exactly four endpoints by design, and the tutorial
@@ -1116,6 +1190,12 @@ paths:
         Idempotent without an `Idempotency-Key`: the write is a conditional
         `UPDATE ... WHERE tutorial_completed_at IS NULL`, so a replay is a no-op
         by construction rather than by bookkeeping.
+
+        **The stored column moves at M9** from `users.tutorial_completed_at` to
+        `player_progression.tutorial_completed_at`, as an expand/contract across
+        two deployments: create and backfill, repoint the write and the read,
+        verify, and only then drop the old column in a later release. **This wire
+        contract does not change** — it stays the boolean `tutorial_completed`.
       responses:
         '200':
           description: Tutorial completion recorded, or already recorded.
@@ -1998,7 +2078,7 @@ components:
 
     StartRunRequest:
       type: object
-      description: Begin a run. Whether runs are server-started is OPEN (ADR-0006).
+      description: Begin a run. Runs are server-started (ADR-0006, Layer 2).
       properties:
         character_id: { type: string, description: Character the player selected. }
       required: [character_id]
@@ -2006,14 +2086,20 @@ components:
     StartedRun:
       type: object
       description: |
-        A server-started run. The seed is server-issued if that model is adopted
-        (RNG-1), making the spawn sequence known to the server.
+        A server-started run. The seed is **server-issued** (RNG-1), which is what makes the
+        spawn sequence known to the server.
+
+        There is no `run_token`. The run identity is the opaque `run_id`, bound server-side to
+        the authenticated actor; a separate browser-held secret would add no property and would
+        be one more thing an XSS could take. See `docs/security/threat-model.md` §4.
+
+        The same payload is returned when an active run already existed, so a client that lost
+        its local state resumes deterministically instead of starting a second run.
       properties:
-        run_id: { type: string, description: Identifier for the run. }
-        run_token: { type: string, description: Presented when finishing the run. }
-        seed: { type: string, description: RNG seed. Presence depends on ADR-0006. }
-        started_at: { type: string, format: date-time, description: Server-recorded start time. }
-      required: [run_id, started_at]
+        run_id: { type: string, description: Opaque identifier for the run. Referenced when finishing it. }
+        seed: { type: string, description: 'Server-issued RNG seed (RNG-1). The frontend initializes the deterministic run domain from this; a browser-generated seed is never authoritative.' }
+        started_at: { type: string, format: date-time, description: Server-recorded start time. Determines weekly attribution and is never re-stamped on resume. }
+      required: [run_id, seed, started_at]
 
     FinishRunRequest:
       type: object
@@ -2027,12 +2113,15 @@ components:
         The authoritative numbers are **not in this request**. They are computed server-side
         and returned in `RunResult.derived_facts`, where a client cannot supply them at all.
 
-        Whether telemetry arrives as the summary counts below or as per-event records is OPEN
-        (ANTI-5); retention is explicitly permitted to be minimal — validate at acceptance and
-        keep only compact derived run facts. Retained per-event data is behavioural personal
-        data, see `docs/security/data-protection.md` §2A.
+        **ANTI-5 is resolved: data minimization.** Telemetry does not arrive as per-event
+        records, no `run_events` table exists, and no raw per-event gameplay history is
+        retained. Validation happens at submission time and only compact authoritative facts
+        persist. See `docs/security/data-protection.md` §2A.
+
+        **No input log (RNG-2).** No gameplay input trace is submitted or retained in v1; that
+        belongs to the deferred Layer 3 design. There is no `run_token` field: the run is
+        identified by the path `runId` and the authenticated actor.
       properties:
-        run_token: { type: string, description: 'Token from the start call, if that model is adopted.' }
         telemetry: { $ref: '#/components/schemas/RunTelemetry' }
       required: [telemetry]
 
@@ -2046,23 +2135,37 @@ components:
         **inputs to server-side derivation**: the server validates the run and derives score,
         paw totals, run facts and achievement progress itself. A value here that the server
         cannot corroborate is discarded, not adopted.
+
+        **The M9 surface is the three required fields only.** The remaining five feed the four
+        `DERIVED_TELEMETRY` facts, which nothing in v1 can establish — so at M9 they are not
+        consumed, not persisted, and need not be sent. They are retained here as the intended
+        shape for whichever milestone resolves **ANTI-6**.
       properties:
         reported_duration_ms: { type: integer, minimum: 0, description: 'Client-measured run duration. Superseded by server-recorded timing where available.' }
         reported_score: { type: integer, minimum: 0, description: 'Client-computed score. Never trusted; the server decides.' }
         reported_run_paws: { type: integer, minimum: 0, description: 'Paws the client believes it collected. Never trusted; derived server-side.' }
-        reported_slayyy_activations: { type: integer, minimum: 0, description: 'Hint for the SLAYYY achievements. Not an authoritative total.' }
-        reported_loli_activations: { type: integer, minimum: 0, description: 'Hint for ACTUAL Loli Bonus activations — bonuses that ENTERED/ACTIVATED. NOT the count of 200-paw thresholds earned: queued bonuses are run-scoped and can expire unstarted, so the two numbers differ. Never inferable from the paw ledger, and never adopted from this field.' }
-        reported_near_miss_count: { type: integer, minimum: 0, description: 'Hint for near-miss achievements. A near miss awards no score and fires at most once per obstacle.' }
-        reported_lane_blocking_passes: { type: integer, minimum: 0, description: 'LANE_BLOCKING obstacles the client believes were safely passed. Hint for cone_dodger.' }
-        reported_peak_queued_loli_bonuses: { type: integer, minimum: 0, description: 'Run-scoped queue depth, for analysis only. Never persisted as progression and never carried into a future run.' }
+        reported_slayyy_activations: { type: integer, minimum: 0, description: 'NOT AT M9 (ANTI-6). Hint for the SLAYYY achievements. Not an authoritative total.' }
+        reported_loli_activations: { type: integer, minimum: 0, description: 'NOT AT M9 (ANTI-6). Hint for ACTUAL Loli Bonus activations — bonuses that ENTERED/ACTIVATED. NOT the count of 200-paw thresholds earned: queued bonuses are run-scoped and can expire unstarted, so the two numbers differ. Never inferable from the paw ledger, and never adopted from this field.' }
+        reported_near_miss_count: { type: integer, minimum: 0, description: 'NOT AT M9 (ANTI-6). Hint for near-miss achievements. A near miss awards no score and fires at most once per obstacle.' }
+        reported_lane_blocking_passes: { type: integer, minimum: 0, description: 'NOT AT M9 (ANTI-6). LANE_BLOCKING obstacles the client believes were safely passed. Hint for cone_dodger.' }
+        reported_peak_queued_loli_bonuses: { type: integer, minimum: 0, description: 'NOT AT M9 (ANTI-6). Run-scoped queue depth, for analysis only. Never persisted as progression and never carried into a future run.' }
       required: [reported_duration_ms, reported_score, reported_run_paws]
 
     RunResult:
       type: object
       description: |
-        The **authoritative** outcome. A flagged run is recorded and excluded from
-        ranking pending review; the player is told honestly rather than silently
-        ignored.
+        The **authoritative** outcome.
+
+        `accepted` counts for score, progression and ranking. `flagged` is recorded with the
+        minimum metadata explaining the classification but mutates **nothing** — no
+        progression, no paw ledger, no personal best, no accepted run count, no leaderboard
+        eligibility, no achievement progress — and the player is told honestly rather than
+        silently ignored. `rejected` preserves only the minimum attempt information and
+        likewise mutates nothing. A rejection is never silently converted, and a flag is never
+        automatically promoted to accepted later.
+
+        `derived_facts` is **not returned at M9** (ANTI-6): nothing in v1 can establish those
+        four numbers, and adopting the client's would breach the approved authority rule.
       properties:
         run_id: { type: string, description: Identifier for the run. }
         status:
@@ -2073,29 +2176,37 @@ components:
         is_personal_best: { type: boolean, description: Whether this beat the previous record. }
         previous_best_score: { type: integer, description: The record before this run. }
         run_paws: { type: integer, description: Authoritative paws for this run. }
-        derived_facts: { $ref: '#/components/schemas/RunDerivedFacts' }
+        derived_facts:
+          allOf:
+            - $ref: '#/components/schemas/RunDerivedFacts'
+          description: 'NOT AT M9 (ANTI-6). Absent until a mechanism exists that can establish these facts.'
         progression: { $ref: '#/components/schemas/Progression' }
         achievements_unlocked:
           type: array
-          description: Achievements unlocked by this run.
+          description: 'Achievements unlocked by this run. Empty before M11.'
           items: { $ref: '#/components/schemas/Achievement' }
         characters_unlocked:
           type: array
           description: Characters unlocked by this run.
           items: { $ref: '#/components/schemas/Character' }
-      required: [run_id, status, score, run_paws, derived_facts, progression]
+      required: [run_id, status, score, run_paws, progression]
 
     RunDerivedFacts:
       type: object
       description: |
         **AUTHORITATIVE server-derived run facts — the only real numbers.**
 
-        Computed by the server from accepted, validated telemetry. A client cannot supply
-        these: they exist only in the response. Every `DERIVED_TELEMETRY` achievement reads
-        from here, never from `RunTelemetry`.
+        Computed by the server. A client cannot supply these: they exist only in the response.
+        Every `DERIVED_TELEMETRY` achievement reads from here, never from `RunTelemetry`.
 
         The flow is: client telemetry/events → server validation → these derived run facts →
         persistent lifetime aggregates.
+
+        **NOT RETURNED AT M9 — ANTI-6.** These four describe what the *player* did, not what
+        the world generated. Layers 1 and 2 can bound them but cannot establish them, and
+        Layer 3 is deferred beyond v1. Since the approved authority rule forbids adopting the
+        client's own count, M9 returns none of them and persists no column for them. The shape
+        is retained as the intended contract for whichever milestone resolves ANTI-6.
       properties:
         loli_activations:
           type: integer
@@ -2131,6 +2242,16 @@ components:
         Ogito from accepted `run_count` with **no** duration filter, Sero from
         `lifetime_loli_activations`. The alternative-reading counters `lifetime_score`,
         `max_loli_bonus_in_single_run` and `accepted_runs_above_min_duration` are **retired**.
+
+        **The M9 surface is the required fields plus `tutorial_completed`.** Those are
+        `DERIVED_PERSISTENT`: their evidence is the authoritative run records the server itself
+        wrote, so Layers 1 and 2 establish them completely. The four `lifetime_*`
+        `DERIVED_TELEMETRY` counters are **not persisted and not returned at M9** — nothing in
+        v1 can establish the per-run facts they accumulate, and the approved authority rule
+        forbids adopting the client's count. Sero's unlock depends on one of them and therefore
+        waits with them. Tracked as **ANTI-6**, which blocks M11.
+
+        Only an `accepted` run mutates any value here.
       properties:
         lifetime_paws: { type: integer, description: Lifetime statistic. Never consumed. }
         loli_cycle_paws:
@@ -2140,12 +2261,12 @@ components:
           description: Persistent progress toward the next Loli Bonus.
         loli_threshold: { type: integer, description: Always 200. }
         best_score: { type: integer, description: Best single-run score. }
-        run_count: { type: integer, description: Completed runs. }
-        achievements_unlocked_count: { type: integer, description: Achievements unlocked. }
-        lifetime_loli_activations: { type: integer, description: "Lifetime count of ACTUAL Loli Bonus activations, accumulated from each accepted run's loli_activations. Sero's approved unlock criterion (3). Verification source DERIVED_TELEMETRY, progress persistence PERSISTED_AGGREGATE. Not the count of thresholds earned." }
-        lifetime_near_misses: { type: integer, description: 'Derived from accepted run telemetry. Feeds near-miss achievements. DERIVED_TELEMETRY source, persisted aggregate.' }
-        lifetime_lane_blocking_passes: { type: integer, description: 'Derived from accepted run telemetry. Feeds cone_dodger. DERIVED_TELEMETRY source, persisted aggregate.' }
-        lifetime_slayyy_activations: { type: integer, description: 'Derived from accepted run telemetry. Feeds SLAYYY achievements. DERIVED_TELEMETRY source, persisted aggregate.' }
+        run_count: { type: integer, description: Accepted runs. No duration filter. }
+        achievements_unlocked_count: { type: integer, description: 'Achievements unlocked. Zero before M11.' }
+        lifetime_loli_activations: { type: integer, description: "NOT AT M9 (ANTI-6). Lifetime count of ACTUAL Loli Bonus activations, accumulated from each accepted run's loli_activations. Sero's approved unlock criterion (3). Verification source DERIVED_TELEMETRY, progress persistence PERSISTED_AGGREGATE. Not the count of thresholds earned." }
+        lifetime_near_misses: { type: integer, description: 'NOT AT M9 (ANTI-6). Derived from accepted run telemetry. Feeds near-miss achievements. DERIVED_TELEMETRY source, persisted aggregate.' }
+        lifetime_lane_blocking_passes: { type: integer, description: 'NOT AT M9 (ANTI-6). Derived from accepted run telemetry. Feeds cone_dodger. DERIVED_TELEMETRY source, persisted aggregate.' }
+        lifetime_slayyy_activations: { type: integer, description: 'NOT AT M9 (ANTI-6). Derived from accepted run telemetry. Feeds SLAYYY achievements. DERIVED_TELEMETRY source, persisted aggregate.' }
         tutorial_completed:
           type: boolean
           description: |

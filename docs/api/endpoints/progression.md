@@ -4,7 +4,7 @@
 
 | Method | Path | Auth | Idempotent | Rate-limit class | Status |
 | --- | --- | --- | --- | --- | --- |
-| GET | `/progression` | authenticated | — | normal | Contract only — needs M9's run-derived counters |
+| GET | `/progression` | authenticated | — | normal | Contract only — built at M9 |
 | POST | `/progression/tutorial` | authenticated **+ verified** | yes | normal | **Implemented at M8** |
 
 **The verified requirement is a deliberate narrowing, recorded here so the route
@@ -91,14 +91,21 @@ chose is only the *physical* location, and it chose `users` because
 `player_progression` does not exist yet: it is PROPOSED in
 [`../../architecture/data-model.md`](../../architecture/data-model.md) §4, and
 every other column in it is derived from accepted run submissions — M9 scope,
-blocked on ADR-0006. `tutorial_completed_at` is also the only row in that table
-with no verification source.
+and M9 was still blocked on ADR-0006 when M8 shipped. (It no longer is: the ADR
+was accepted on 2026-09-22.) `tutorial_completed_at` is also the only row in that
+table with no verification source.
 
 **This placement is temporary.** When M9 creates `player_progression`, the
-intended migration is `users.tutorial_completed_at` →
+migration is `users.tutorial_completed_at` →
 `player_progression.tutorial_completed_at`, backfilling every existing value so
 no player is asked to repeat a tutorial they already finished. Recorded in
-`data-model.md` §4 as well, so it cannot be quietly forgotten.
+`data-model.md` §4.1 as well, so it cannot be quietly forgotten.
+
+It is an **expand/contract** move across two deployments: create, backfill, repoint the write
+and the read, verify in production — and only then, in a **later separate deployment**, drop
+`users.tutorial_completed_at`. The relocation is physical. It changes no ownership, reopens no
+product decision, and **the public wire contract stays the boolean `tutorial_completed`**
+throughout.
 
 **TU-3 is resolved:** the paw collected during the tutorial does **not** count
 toward progression. It cannot: the tutorial submits nothing, and no endpoint
@@ -106,16 +113,27 @@ exists by which a client could add to the paw ledger.
 
 ---
 
-## Unlock counters — APPROVED
+## Unlock counters — APPROVED, with one class deferred
 
-`player_progression` also carries the counters that character unlock criteria
-need, and it carries **both readings of each ambiguous criterion** — see
+`player_progression` carries the counters that character unlock criteria need — see
 [`../../architecture/data-model.md`](../../architecture/data-model.md) §4.
 
-This is deliberate. The criteria semantics are OPEN (AU-4), and **a counter that
-was never recorded cannot be reconstructed retroactively.** Recording both from
-M9 costs almost nothing; not recording them would mean every existing player's
-progress is wrong once the decision is made.
+**From M9:** `best_score` and `run_count`, which are Büşo's and Ogito's approved criteria.
+Both are `DERIVED_PERSISTENT` — their evidence is the authoritative run records the server
+itself wrote — so Layers 1 and 2 establish them completely.
 
-Whether these counters are exposed on this endpoint is **PROPOSED**: only the
+**Not from M9:** `lifetime_loli_activations`, `lifetime_near_misses`,
+`lifetime_lane_blocking_passes` and `lifetime_slayyy_activations`. These are
+`DERIVED_TELEMETRY`, and nothing in v1 can establish them: Layers 1 and 2 bound a number but
+do not establish it, and Layer 3 is deferred. The APPROVED authority rule forbids adopting the
+client's count, so M9 records none of them. Tracked as **ANTI-6**, which blocks **M11**.
+
+The "record it early because it cannot be reconstructed" argument does **not** rescue them.
+A counter accumulated from an untrustworthy source would have to be discarded the moment a
+real mechanism arrived, so it could not be relied on retroactively either — and meanwhile it
+would carry a retention obligation over behavioural personal data (SEC-5) in exchange for
+nothing. AU-4 is also resolved now, so the ambiguity that motivated recording both readings no
+longer applies.
+
+Whether the counters that do exist are exposed on this endpoint is **PROPOSED**: only the
 ones the UI actually displays.

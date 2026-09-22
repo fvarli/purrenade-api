@@ -42,7 +42,7 @@ squarely personal data with a retention obligation. How location is derived is
 
 ---
 
-## 2A. Gameplay telemetry is personal data — APPROVED framing, retention OPEN
+## 2A. Gameplay telemetry is personal data — APPROVED framing; **ANTI-5 resolved**, period still OPEN
 
 The M0.5 achievement authority rule requires that achievement progression be **derived
 server-side from accepted, validated telemetry** rather than adopted from client summary
@@ -60,22 +60,31 @@ now rather than discovered at M14:
 | It is subject to **deletion/anonymization** | Whatever §3 eventually decides applies here too |
 | It increases the run-submission **payload** and per-run **storage** | An operational cost, not only a legal one |
 
-**Data minimization applies, and now has an explicitly sanctioned form.** ADR-0006 states that
-raw events need **not** be retained forever: the implementation may **validate raw telemetry at
-run acceptance and persist compact authoritative derived run facts, discarding the raw
-events**, where that satisfies replay, audit and security requirements.
+**ANTI-5 is resolved, and it resolved toward minimization.** ADR-0006 (accepted 2026-09-22)
+chose the lowest-footprint option of the three that were on the table:
 
-| Option | Privacy footprint |
-| --- | --- |
-| **Validate at acceptance, keep derived run facts, discard raw events** | **Lowest — the preferred default** |
-| Retain raw events for a bounded window, then reduce | Medium; the window itself becomes a retention decision |
-| Retain raw events indefinitely | Highest, and hardest to defend under KVKK |
+| Option | Privacy footprint | Chosen |
+| --- | --- | --- |
+| **Validate at submission, keep compact derived facts, retain no raw events** | **Lowest** | **Yes** |
+| Retain raw events for a bounded window, then reduce | Medium; the window itself becomes a retention decision | No |
+| Retain raw events indefinitely | Highest, and hardest to defend under KVKK | No |
 
-This is the substance of **ANTI-5**, and it is a privacy decision as much as an architectural
-one. The burden of justification falls on **retaining**, not on discarding.
+Concretely: **no `run_events` table is created, and no raw per-event gameplay history is
+retained.** What persists is the authoritative run record, compact authoritative derived
+facts, the minimum validation metadata needed to explain a classification, and the approved
+progression state.
 
-**Retention period and storage representation for telemetry remain OPEN**, together with the
-rest of §4.
+**The footprint shrank further than the table suggests.** ADR-0006 also ships Layers 1 and 2
+only, and those cannot *establish* a `DERIVED_TELEMETRY` fact — so rather than adopt a client
+counter in breach of the authority rule, M9 persists and returns **none** of the four
+telemetry-derived facts at all. That is tracked as **ANTI-6** and blocks M11. Until it
+resolves, the behavioural-personal-data surface described above is **not created**.
+
+**Any future raw-event retention is a separate privacy decision**, not something ANTI-6
+resolving later implies. The burden of justification falls on **retaining**, not on discarding.
+
+**What remains OPEN as SEC-5** is the retention period for the data that *is* kept — the run
+records and their compact derived facts — together with the rest of §4.
 
 ## 3. Player rights — OPEN (SEC-3)
 
@@ -160,7 +169,7 @@ Related: the **consent records** for real-person and real-animal likenesses
 | Ref | Question |
 | --- | --- |
 | SEC-3 | Deletion, export, consent capture, retention — **the whole section** |
-| SEC-5 | Retention period and minimization for **gameplay telemetry** (§2A), jointly with ANTI-5 |
+| SEC-5 | Retention period for the run records and compact derived facts that are kept (§2A). ANTI-5 is resolved — no raw per-event history is retained — so this is now a period question, not a form question. |
 | LB-4 / LB-5 | Leaderboard opt-out; deleted and banned players' entries |
 | AUTH-4 | How session location is derived, and whether it is proportionate |
 | OB-2 | Is an external error tracker acceptable? |

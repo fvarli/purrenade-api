@@ -43,7 +43,7 @@ Every limiter returns **two** limits, both of which must be satisfied.
 | display name | `PATCH /profile` | 3/day | — |
 | normal | Authenticated reads | 60/min | — |
 | health | `GET /api/v1/health` | — (no identifier) | 60/min |
-| submission | Run start and finish | **Not yet — M9.** Bounded by how fast runs can plausibly be played. |
+| **submission** | Run start **and** finish | **Semantics APPROVED (ADR-0006); values selected at M9.** User-scoped primary control, IP as secondary abuse defence. Bounded by how fast runs can plausibly be played. |
 
 Readiness was the one public route with no limiter, and it is the one public
 route that queries the database — an unauthenticated cheap `GET` turning into
@@ -89,12 +89,29 @@ forgot-password all send mail to an address the caller supplies.
 | **Progressive delay is preferred to hard lockout** | A hard lockout converts credential stuffing into a denial-of-service against the targeted account |
 | Repeated failures are logged as a signal | |
 
-### Run submission — APPROVED
+### Run submission — APPROVED (ADR-0006)
 
 A player cannot legitimately finish runs faster than runs take to play. That makes
 the limit both safe to set tightly and a **useful abuse signal**: a submission
 rate above the plausible ceiling is evidence in its own right, feeding
 [anti-cheat.md](anti-cheat.md).
+
+**The limiter's existence and semantics are decided.** Only its numbers are outstanding, and
+they are an engineering parameter rather than an open product decision.
+
+| Rule | Detail |
+| --- | --- |
+| Applies to **both** `POST /game-runs` and `POST /game-runs/{runId}/finish` | Starting is as abusable as finishing, and the start path creates state |
+| **User-scoped** primary control | The account is what is being protected, and both endpoints are authenticated |
+| **IP** as secondary abuse defence | Never the primary control on an authenticated surface — shared mobile egress makes it a blunt instrument |
+| Normal mobile retry behaviour must stay practical | A player on a flaky connection must not be locked out of their own result. This is the binding constraint on the numbers. |
+| An idempotent retry creates **no duplicate state** | Guaranteed by `(user_id, idempotency_key)`, not by the limiter |
+| A `429` must **not** consume the idempotency slot | Otherwise a rate-limit refusal would poison the legitimate retry that follows it |
+| Values live in `App\Support\RateLimits` and `App\Providers\RateLimitServiceProvider` | **Never controller literals** |
+| **Tests must cover enforcement** | Regression gate S5 |
+
+**Numeric values are an M9 implementation parameter**, derived from the conventions in §2 and
+from expected legitimate start/retry behaviour — not guessed, and not left open.
 
 ### Admin endpoints — PROPOSED
 
@@ -133,3 +150,6 @@ often before anything else notices.
 | RL-1 | Fail open or fail closed when the limiter is unavailable? §4. |
 | RL-2 | Is Redis adopted for rate limiting, and at which milestone? (CACHE-1) |
 | ~~AUTH-3~~ | **Resolved at M2:** progressive throttling, no lockout. |
+
+The **submission** limiter is not an open question: ADR-0006 decided that it exists and how it
+behaves (§3). Selecting its numbers during M9 planning reopens nothing.

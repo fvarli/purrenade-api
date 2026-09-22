@@ -46,16 +46,24 @@ Other domains receive an authenticated identity, nothing more.
 
 ## 3. Runs — APPROVED scope
 
-**Owns:** the run record — start, finish, duration, score, `runPaws`, and any
-validation metadata.
+**Owns:** the run record — start, finish, duration, score, `runPaws`, the run's
+lifecycle state, and any validation metadata.
 
 **Rules**
 - **Score is server-authoritative.** The client proposes.
-- Submission is **idempotent**.
+- Submission is **idempotent**, and the idempotency identity lives on the run
+  record itself.
 - Validation lives here, per
-  [ADR-0006](../decisions/ADR-0006-run-validation-and-anti-cheat-boundary.md).
-- **Tutorial runs are not runs.** The tutorial submits nothing and touches no
-  score, leaderboard, or progression data.
+  [ADR-0006](../decisions/ADR-0006-run-validation-and-anti-cheat-boundary.md):
+  **Layer 1** structural and plausibility validation, plus **Layer 2** server-owned
+  run identity with a server-recorded start and a server-issued seed.
+- **The run lifecycle is server-owned.** A run is created `active` before gameplay
+  begins, and a user may hold **at most one active run** — a database invariant,
+  not an application check.
+- **Only an `accepted` run reaches Progression.** `flagged` and `rejected` runs are
+  recorded and hand over nothing.
+- **Tutorial runs are not runs.** The tutorial submits nothing, touches no
+  score, leaderboard, or progression data, and does not occupy the active-run slot.
 
 **Boundary:** Runs does not itself decide progression. It records what happened
 and hands an accepted result to Progression **inside the same transaction**.
@@ -75,8 +83,14 @@ score, run count, and the counters needed by unlock criteria.
   and **preserves overflow**.
 - Magnet-collected paws count normally.
 - Achievement unlocks are **idempotent per `(player, achievement)`**.
-- Unlock counters are **persisted from M9**, before the criteria semantics are
-  decided — a counter that was never recorded cannot be reconstructed.
+- **`DERIVED_PERSISTENT` unlock counters are persisted from M9** — `bestScore` and
+  `runCount`. Their evidence is the authoritative run records the server wrote.
+- **`DERIVED_TELEMETRY` counters are not persisted at M9.** Nothing in v1 can
+  establish them, and Progression never accepts a value the client asserted — so it
+  records none rather than launder a client count into a stored total. Tracked as
+  **ANTI-6**, which blocks M11. The "persist early, it cannot be reconstructed"
+  rule does not rescue them: a counter built from an untrustworthy source would
+  have to be discarded anyway.
 
 **Boundary:** Progression never accepts a value the client asserted. It derives
 everything from an accepted run result.

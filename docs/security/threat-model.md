@@ -48,9 +48,11 @@ leaderboard turns that into an incentive.
 | --- | --- |
 | Score is **server-authoritative**; the client proposes | **APPROVED** |
 | Submission is **idempotent** | **APPROVED** |
-| Plausibility bounds derived from approved tuning values | PROPOSED |
-| Server-issued run token and seed | **OPEN** (ADR-0006, coupled to PWA-1) |
-| Telemetry replay against the pure domain | Available later; the domain is kept portable for exactly this |
+| Structural validation — protocol, identity, lifecycle, tuning-independent impossibilities | **APPROVED** (ADR-0006, Layer 1) — **may reject** |
+| Plausibility bounds derived from tuning values | **APPROVED** (ADR-0006, Layer 1) — **flag only**, while the tuning they derive from is still PROPOSED |
+| **Server-owned run identity and a server-issued seed** | **APPROVED** (ADR-0006, Layer 2). A run is created server-side, `active` and bound to the authenticated actor, before gameplay. **One active run per user**, enforced in the database. |
+| A separate browser-held **run token** | **Not adopted.** It adds no property beyond *authenticated actor + opaque `run_id` + server-side ownership*, and §4 already defends XSS on the grounds that the browser holds no portable credential. |
+| Telemetry replay against the pure domain | **Deferred beyond v1**; the domain is kept portable for exactly this. Its absence is what leaves **ANTI-6** open. |
 | **Client-side obfuscation** | **Explicitly not a control** |
 
 See [anti-cheat.md](anti-cheat.md) and
@@ -83,8 +85,9 @@ See [anti-cheat.md](anti-cheat.md) and
 | Replayed submission | Idempotency key with a unique constraint |
 | Double-counted paws | Atomic ledger update inside the transaction |
 | Duplicate achievement unlock | Unique `(player, achievement)` |
-| Two concurrent runs | Independent idempotent submissions; a stricter rule may come from ADR-0006 |
-| Fabricated achievement | **Every achievement is `DERIVED_PERSISTENT` or `DERIVED_TELEMETRY`.** Client-reported summary counters are **never** adopted as authoritative progression — see [anti-cheat.md](anti-cheat.md) §2.1. |
+| Two concurrent runs | **At most one active run per user**, enforced by a partial unique index, not an application check (ADR-0006, GR-4). Starting again resumes the existing run rather than creating a second. |
+| Fabricated achievement | **Every achievement is `DERIVED_PERSISTENT` or `DERIVED_TELEMETRY`.** Client-reported summary counters are **never** adopted as authoritative progression — see [anti-cheat.md](anti-cheat.md) §2.1. Because nothing in v1 can establish a `DERIVED_TELEMETRY` fact, none is persisted or returned at M9 — **ANTI-6**. |
+| A stale retry re-applying progression | The idempotency identity lives with the durable run history; **there is no expiry window** an old retry could outlive (GR-3) |
 
 ### Leaderboard
 
@@ -143,10 +146,11 @@ cannot work, instead of on server validation that can.
 | Ref | Question |
 | --- | --- |
 | ADR-0005 | *(Direction Accepted.)* Session lifetime, CSRF pattern and 2FA enforcement point remain, at M2 |
-| ADR-0006 | Run validation model |
+| ~~ADR-0006~~ | **Accepted 2026-09-22.** Layer 1 + Layer 2 in v1; Layer 3 deferred with the domain kept portable; no separate run token. |
+| **ANTI-6** | **How the four `DERIVED_TELEMETRY` run facts are established.** Until something can, they are neither persisted nor returned. **Blocks M11.** |
 | ~~SEC-1~~ | **Resolved at M2.** Password policy and breach-list checking — [authentication.md](authentication.md) §2. |
 | SEC-3 | KVKK/GDPR: deletion, export, consent, retention |
 | SEC-4 | Published security contact and disclosure timeline |
 | LB-7 | Automated profanity and confusable screening — **future hardening**, not a v1 blocker. Admin force-rename is the approved v1 answer to an abusive or impersonating name. |
 | OB-2 | Is an external error tracker acceptable under KVKK? |
-| ANTI-5 | What validated event data is retained to satisfy the achievement authority rule (interacts with SEC-3) |
+| ~~ANTI-5~~ | **Resolved by ADR-0006.** Data minimization: no raw per-event gameplay history is retained, and no `run_events` table is created. The surface SEC-3 must cover is correspondingly smaller. |

@@ -42,11 +42,12 @@ These are separated because they are the ones most likely to be quietly skipped.
 | S2 | **Admin-without-2FA is denied on every admin endpoint**, re-verified whenever an admin route is added |
 | S3 | Cross-account access is refused |
 | S4 | No sensitive data appears in logs — asserted, not assumed |
-| S5 | Rate limiting is applied and tested on every auth and submission endpoint |
-| S6 | No client-submitted score or progression value is trusted |
+| S5 | Rate limiting is applied and tested on every auth and submission endpoint — **including run start and run finish**, and including that a `429` does not consume an idempotency slot |
+| S6 | No client-submitted score or progression value is trusted. A `flagged` or `rejected` run mutates **no** progression, ledger, personal best or accepted `run_count` |
 | S7 | Error responses leak no stack trace, SQL, or internal detail |
 | **S8** | **A completed password reset leaves 2FA enrolment, secret and recovery codes untouched, and the next login is still challenged.** A named gate because this invariant is one careless "clear the account's auth state" refactor away from silent removal. |
-| S9 | No achievement progression is adopted from a client summary counter |
+| S9 | No achievement progression is adopted from a client summary counter. While **ANTI-6** is open this is checkable structurally: the four `DERIVED_TELEMETRY` columns must **not exist** on `runs` or `player_progression`, and `RunResult.derived_facts` must not be populated |
+| S10 | **At most one `active` run per user**, proven by the database refusing the second — not by an application check |
 
 S2 exists as a standing gate rather than a one-time test precisely because
 mandatory admin 2FA is the kind of control that breaks when someone adds a route.
@@ -60,12 +61,13 @@ mandatory admin 2FA is the kind of control that breaks when someone adds a route
 | D1 | Every new constraint is proven by a test that **attempts to violate it** |
 | D2 | Every transactional operation has an atomicity test |
 | D3 | Every concurrent-access path has a concurrency test |
-| D4 | Every idempotent operation has a replay test |
+| D4 | Every idempotent operation has a replay test: same key + same effective request returns the original result with no further side effects, and same key + different effective request is a `409` with none |
 | D5 | Every new index is justified by a query, and the plan was checked |
 | D6 | Migrations are reversible, or the reason they are not is stated |
 | D7 | No schema field persists a queued Loli Bonus beyond its run (`owed_loli_bonuses` must not exist) |
-| D8 | `lifetime_loli_activations` counts only bonuses that actually started — never thresholds earned |
+| D8 | `lifetime_loli_activations` counts only bonuses that actually started — never thresholds earned. **Not created until ANTI-6 resolves**; until then the gate is that it does not exist |
 | D9 | Audio mute and volume are separate columns; unmute restores the previous non-zero level |
+| D10 | The idempotency identity has **no expiry**: a replay arriving arbitrarily late still returns the original result and applies nothing |
 
 ---
 

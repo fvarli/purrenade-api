@@ -9,18 +9,24 @@
 | [0003](ADR-0003-laravel-rest-api-backend.md) | Laravel REST API backend | **Accepted** | Product-wide |
 | [0004](ADR-0004-postgresql-primary-database.md) | PostgreSQL as the primary database | **Accepted** | Product-wide |
 | [0005](ADR-0005-authentication-and-2fa-strategy.md) | Authentication and 2FA strategy | **Accepted and implemented** | Product-wide |
-| [0006](ADR-0006-run-validation-and-anti-cheat-boundary.md) | Run validation and anti-cheat boundary | **🔴 Proposed — decision required** | Product-wide |
+| [0006](ADR-0006-run-validation-and-anti-cheat-boundary.md) | Run validation and anti-cheat boundary | **Accepted** | Product-wide |
 | 0007 | Localization strategy | Accepted | Product-wide — mirrored in the frontend; the backend's obligations are summarized below |
 | [0008](ADR-0008-source-of-truth-and-design-reference-hierarchy.md) | Source-of-truth and design-reference hierarchy | **Accepted** | Product-wide |
 
 ---
 
-## 🔴 The two that block implementation
+## Neither of the two blockers blocks anything now
 
-| ADR | Blocks | Why it cannot wait |
+| ADR | Was blocking | Closed |
 | --- | --- | --- |
-| **0005** | M2, M3 | Determines CORS, CSRF, cookie flags, token lifetime, and whether a native shell later needs a **second authentication path**. Choosing cookie-only forecloses the approved "Android/iOS must remain possible" requirement. |
-| **0006** | M9, M10 | A public leaderboard ships in v1 and no approved reference addresses score integrity. Retrofitting validation after runs are recorded means deciding what to do with a table of unverifiable history. |
+| **0005** | M2, M3 | **Accepted and implemented at M2.** All ten open parameters resolved. |
+| **0006** | M9, M10 | **Accepted 2026-09-22.** Layer 1 + Layer 2 ship in v1; Layer 3 is deferred with the domain kept portable. |
+
+ADR-0006 leaves exactly one consequence open: **ANTI-6** — the four `DERIVED_TELEMETRY`
+run facts have no verification source while Layer 3 is deferred, so they are neither
+persisted nor returned. It blocks **M11** only, and neither M9 nor M10. It is tracked in
+the register at `purrenade/docs/product/open-decisions.md` and in
+[`../security/anti-cheat.md`](../security/anti-cheat.md) §8.
 
 ---
 

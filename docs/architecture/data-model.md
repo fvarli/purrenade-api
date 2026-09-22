@@ -26,7 +26,7 @@ PostgreSQL schema **shape**, constraints and indexing rationale.
 
 ## 2. Identity
 
-### `users` — PROPOSED
+### `users` — **IMPLEMENTED (M2, M8)**, with columns still proposed
 | Column | Notes |
 | --- | --- |
 | `id` | Primary key |
@@ -42,6 +42,19 @@ PostgreSQL schema **shape**, constraints and indexing rationale.
 | `deleted_at` | Soft delete; interacts with KVKK — see [`../security/data-protection.md`](../security/data-protection.md) |
 
 **Constraints:** unique `username`; unique lowercased `email`; `role` check.
+
+**What actually shipped, as of M8.** The table exists in production and diverges from the
+shape above; the divergence is recorded here rather than silently reconciled.
+
+| Documented | Shipped |
+| --- | --- |
+| `username` | `display_name` plus `display_name_normalized` (the unique one), and `display_name_changed_at` |
+| `locale` | **Not created yet** |
+| `music_volume`, `music_muted`, `effects_volume`, `effects_muted` | **Not created yet** |
+| `deleted_at` | **Not created yet** — it lands with SEC-3 |
+| `role` check constraint | Shipped as an indexed string with a default; the check constraint is outstanding against §7 |
+| — | `tutorial_completed_at` (M8) — temporary, see §4.1 |
+| — | The 2FA and session columns, per ADR-0005 |
 
 ### `email_verification_codes` — PROPOSED
 6-digit code (**hashed, never stored in plaintext**), `expires_at`,
@@ -67,29 +80,37 @@ selects. **Index:** `(user_id, last_seen_at desc)`.
 
 ## 3. Runs
 
-### `runs` — PROPOSED
+### `runs` — PROPOSED · M9 column set fixed by ADR-0006
+
 | Column | Notes |
 | --- | --- |
-| `id` | |
-| `user_id` | FK → `users` |
+| `id` | Opaque. It is the run identity a finish call references; there is **no separate run token** — see [`../security/anti-cheat.md`](../security/anti-cheat.md) §3. |
+| `user_id` | FK → `users`. The authenticated actor, resolved from the credential. |
 | `character_id` | FK → `characters` |
-| `started_at` | **Server-recorded.** Determines weekly attribution (LB-1). |
-| `finished_at` | |
-| `duration_ms` | |
-| `score` | **Server-authoritative integer** |
-| `run_paws` | Paws collected this run — **authoritative**, derived, not the client's claim |
-| `near_miss_count` | Authoritative near-miss count, **derived from validated telemetry** |
-| `lane_blocking_passes` | Cones safely passed without collision — feeds `cone_dodger` |
-| `slayyy_activations` | Authoritative activation count, derived from validated telemetry |
-| `loli_activations` | **Bonuses that actually started** this run — the ENTERING/ACTIVE transition. **Not** the count of thresholds earned. Derived from validated telemetry, never from the paw ledger. |
-| `seed` | Present if the seed is server-issued (RNG-1) |
-| `status` | `accepted` / `flagged` / `rejected` |
-| `validation_meta` | Why it was flagged, if it was |
-| `idempotency_key` | **Unique per user** |
+| `started_at` | **Server-recorded**, at run creation, before gameplay. Determines weekly attribution (LB-1). |
+| `finished_at` | Null while `active` |
+| `duration_ms` | Null while `active` |
+| `score` | **Server-authoritative integer.** Null while `active`. |
+| `run_paws` | Paws collected this run — **authoritative**, not the client's claim. Null while `active`. |
+| `seed` | **Server-issued** (RNG-1). Written at creation. |
+| `status` | `active` / `accepted` / `flagged` / `rejected` |
+| `validation_meta` | Structured rule codes and observed-versus-bound values explaining a `flagged` or `rejected` classification. **Never raw events.** |
+| `idempotency_key` | **Unique per user.** Null while `active`; set at finish. |
+| `idempotency_fingerprint` | Hash of the effective finish request. Without it, "same key, different request → `409`" has nothing to compare against. |
 
-**Constraints:** `score >= 0`; `run_paws >= 0`; all derived counters `>= 0`;
-`finished_at >= started_at`; unique `(user_id, idempotency_key)` — this single constraint is
-what makes retry-safe submission real rather than hoped for.
+**Constraints**
+- `status IN ('active', 'accepted', 'flagged', 'rejected')`
+- **`unique (user_id) where status = 'active'`** — a partial unique index. This is what makes
+  "one active run per user" a database invariant rather than a read-then-check query that
+  loses a race (GR-4).
+- `unique (user_id, idempotency_key)` — the single constraint that makes retry-safe
+  submission real rather than hoped for (GR-3). The identity lives here for the life of the
+  run record; **there is no cleanup window**, so an old retry can never apply progression
+  twice.
+- `score >= 0`; `run_paws >= 0`; `duration_ms > 0`; `finished_at >= started_at` — each
+  applying to finished rows.
+
+**No `run_events` table, and no raw per-event history.** See below.
 
 **No `queued_loli_bonuses` column.** The Loli Bonus queue is **run-scoped**: it lives in the
 client's `RunState` and in run telemetry, and ends with the run. There is **no
@@ -97,8 +118,8 @@ client's `RunState` and in run telemetry, and ends with the run. There is **no
 a bankable meta-progression currency. A peak queue depth may be recorded as telemetry for
 analysis; it is never an entitlement.
 
-**Derived-counter rule — APPROVED.** Every counter above is **derived server-side from
-accepted, validated telemetry**, never adopted from a client summary counter. See
+**Derived-counter rule — APPROVED.** Every counter here is **derived server-side**, never
+adopted from a client summary counter. See
 [`../security/anti-cheat.md`](../security/anti-cheat.md) §2.1.
 
 The contract makes this structural: the request carries only
@@ -106,48 +127,89 @@ The contract makes this structural: the request carries only
 returned in `RunResult.derived_facts` and persisted from there. **No column on this table is
 ever written directly from a client-supplied field.**
 
+#### Four columns deliberately absent at M9 — ANTI-6
+
+`near_miss_count`, `lane_blocking_passes`, `slayyy_activations` and `loli_activations` are
+**not created at M9.**
+
+They describe what the *player* did, not what the world generated, so Layers 1 and 2 can bound
+them but cannot establish them — and Layer 3 is deferred beyond v1. The rule above admits no
+exception, so the choice is between adopting a client counter and not having the column. M9
+does not have the column.
+
+Creating them early and filling them from client aggregates would breach the trust boundary at
+the outset and buy nothing: a counter accumulated from an untrustworthy source would have to
+be **discarded** the moment a real mechanism arrived, so it could not be relied on
+retroactively either. Adding nullable counter columns later is an ordinary expand migration.
+
+Tracked as **ANTI-6**, which blocks **M11** only.
+
 **Indexes**
 - `(user_id, created_at desc)` — profile history
 - `(status, score desc)` partial on `status = 'accepted'` — all-time ranking
 - `(status, started_at, score desc)` partial on `status = 'accepted'` — weekly ranking
 
-### `run_events` — OPEN (DM-1), but **no longer optional in principle**
+### `run_events` — **not created** (DM-1 resolved, ANTI-5)
 
-The M0.5 achievement authority rule requires achievement progression to be derived from
-accepted, validated telemetry rather than from client totals. **Some** validated event
-retention is therefore required; the question is now *what form*, not *whether*:
+**ADR-0006 chose data minimization.** No `run_events` table exists at M9, and **no raw
+per-event gameplay history is retained** merely because it might be useful later.
 
-| Option | Trade-off |
-| --- | --- |
-| Retain per-event records | Strongest; largest storage and privacy footprint |
-| **Derive authoritative per-run counts at acceptance and discard the raw events** | Satisfies the authority rule with far less retained personal data — **data minimization favours this** |
-| Retain nothing | **Not available** — it would leave four achievements unverifiable |
+Validation happens at submission time. What persists is only:
 
-Retained per-event data is **behavioural personal data** with a retention obligation — see
-[`../security/data-protection.md`](../security/data-protection.md) §2A. Tracked as **ANTI-5**
-and **SEC-5**.
+- the authoritative run record;
+- compact authoritative derived facts;
+- the minimum validation metadata required to explain or classify the result;
+- the progression and ledger state approved product behaviour requires.
+
+Retained per-event data would be **behavioural personal data** carrying a retention obligation
+— see [`../security/data-protection.md`](../security/data-protection.md) §2A. Not retaining it
+is the smaller surface, and it is the option the register already recorded as explicitly
+permitted.
+
+**Any future raw-event retention requires a separate privacy/retention decision** (SEC-3,
+SEC-5). It is not implied by ANTI-6 being resolved later.
 
 ---
 
 ## 4. Progression
 
-### `player_progression` — PROPOSED
+### `player_progression` — PROPOSED · M9 column set fixed by ADR-0006
 One row per user.
+
+**The M9 column set:**
 
 | Column | Verification Source | Notes |
 | --- | --- | --- |
 | `lifetime_paws` | `DERIVED_PERSISTENT` | Never consumed |
 | `loli_cycle_paws` | `DERIVED_PERSISTENT` | `0..199`. **Check constraint enforces the range.** |
 | `best_score` | `DERIVED_PERSISTENT` | **Büşo's approved criterion** (≥ 2,500) |
-| `run_count` | `DERIVED_PERSISTENT` | Accepted runs. **Ogito's approved criterion** (10). No duration filter. |
-| `lifetime_loli_activations` | **`DERIVED_TELEMETRY`** | **Sero's approved criterion** (3). Accumulates the accepted run's `loli_activations` — **actual activations**, not thresholds earned. |
-| `lifetime_near_misses` | **`DERIVED_TELEMETRY`** | Feeds `close_call` |
-| `lifetime_lane_blocking_passes` | **`DERIVED_TELEMETRY`** | Feeds `cone_dodger` |
-| `lifetime_slayyy_activations` | **`DERIVED_TELEMETRY`** | Feeds `slayyy_master` |
+| `run_count` | `DERIVED_PERSISTENT` | Accepted runs only. **Ogito's approved criterion** (10). No duration filter. |
 | `tutorial_completed_at` | — | Null until first completion; **not** re-stamped on replay. **Lives on `users` until M9** — see §4.1 |
 
 Every column here is a **`PERSISTED_AGGREGATE`** by progress persistence. The Verification
-Source column records something different — where the *evidence* came from.
+Source column records something different — where the *evidence* came from. Every M9 column is
+`DERIVED_PERSISTENT`, which is exactly the set Layers 1 and 2 **can** establish: the evidence
+is the authoritative run records the server itself wrote.
+
+**Only an `accepted` run mutates any of these.** A `flagged` or `rejected` run mutates none —
+no progression, no ledger, no personal best, no `run_count`.
+
+#### Four counters deliberately absent at M9 — ANTI-6
+
+| Column | Verification Source | Feeds |
+| --- | --- | --- |
+| `lifetime_loli_activations` | **`DERIVED_TELEMETRY`** | **Sero's approved criterion** (3) — *actual* activations, not thresholds earned |
+| `lifetime_near_misses` | **`DERIVED_TELEMETRY`** | `close_call` |
+| `lifetime_lane_blocking_passes` | **`DERIVED_TELEMETRY`** | `cone_dodger` |
+| `lifetime_slayyy_activations` | **`DERIVED_TELEMETRY`** | `slayyy_master` |
+
+These accumulate the four `runs` columns that M9 does not create, for the same reason: no
+mechanism in v1 can establish them, and the authority rule forbids adopting the client's
+count. They arrive with whatever resolves **ANTI-6**, which blocks **M11** only.
+
+The naming rule below is why this matters: storing a total never reclassifies where its
+evidence came from, so a `DERIVED_TELEMETRY` counter cannot be quietly laundered into a
+`DERIVED_PERSISTENT` one by being written to a table.
 
 ### 4.1 `tutorial_completed_at` is on `users` until M9 — APPROVED (M8)
 
@@ -156,8 +218,9 @@ completion ([`domain-boundaries.md`](domain-boundaries.md) §4), and M8 did not 
 that. What M8 chose is where the column physically sits until `player_progression`
 actually exists.
 
-**Why not create the table at M8.** `player_progression` is PROPOSED, and every other
-column in it is derived from accepted run submissions — M9 scope, blocked on ADR-0006.
+**Why not create the table at M8.** `player_progression` was PROPOSED, and every other
+column in it is derived from accepted run submissions — M9 scope, and M9 was still blocked
+on ADR-0006 at the time. (It no longer is: the ADR was accepted on 2026-09-22.)
 Creating it to hold one unrelated column would be implementing a proposed design early,
 and would invite the rest of it to be filled in piecemeal by whoever needed the next
 field. `tutorial_completed_at` is also the only row in the table with **no verification
@@ -172,10 +235,17 @@ because `$guarded = ['*']` disables mass assignment outright.
 
 | Step | Action |
 | --- | --- |
-| 1 | Create `player_progression` with its full approved column set, including `tutorial_completed_at` |
-| 2 | **Backfill** `player_progression.tutorial_completed_at` from `users.tutorial_completed_at` for every row, preserving the original timestamp |
+| 1 | Create `player_progression` with its **approved M9 column set** (above), including `tutorial_completed_at` |
+| 2 | **Backfill** `player_progression.tutorial_completed_at` from `users.tutorial_completed_at` for every row, preserving the original timestamp exactly |
 | 3 | Repoint the write in `TutorialController` and the read projection in `AuthenticatedUserResource` |
-| 4 | Drop `users.tutorial_completed_at` only once the backfill is verified |
+| 4 | **Verify the production backfill and the resulting behaviour** |
+| 5 | Drop `users.tutorial_completed_at` — **only in a later, separate contract deployment** |
+
+**Expand and contract must not share a deployment.** Steps 1–4 are the expand; step 5 is the
+contract. Collapsing them removes the column in the same release that starts writing
+elsewhere, which leaves no safe rollback and no window in which to discover that the backfill
+was wrong. The public wire contract is unchanged throughout: it stays the boolean
+`tutorial_completed`.
 
 Skipping the backfill would ask every existing player to sit through a tutorial they
 have already completed — the precise failure server-side persistence exists to prevent.
@@ -196,8 +266,10 @@ submission transaction. Never read-modify-write in application code — that is 
 lost-update bug this table would otherwise produce under two tabs.
 
 ### `paw_ledger` — PROPOSED
-Append-only: `run_id`, `delta`, `resulting_cycle`, `bonuses_triggered`,
-`created_at`.
+Append-only: `user_id`, `run_id`, `delta`, `resulting_cycle`, `bonuses_triggered`,
+`created_at`. (`user_id` was absent from this list while the index below already led with it.)
+
+**Only an `accepted` run appends to it.**
 
 An append-only ledger makes the paw total auditable and lets a disputed
 progression state be reconstructed. **Index:** `(user_id, created_at desc)`.
@@ -243,9 +315,16 @@ source of truth.
 
 ## 6. Operational
 
-### `idempotency_keys` — PROPOSED
-If idempotency is generalized beyond runs: key, user, endpoint, request
-fingerprint, stored response, `expires_at`. **Unique `(user_id, key)`**.
+### `idempotency_keys` — **not created at M9**
+Run submission does not need it. The identity lives on `runs` as
+`(user_id, idempotency_key)` with a unique constraint and an `idempotency_fingerprint` — the
+simpler model, and one that avoids a second source of truth for the same fact (GR-3).
+
+It returns only if idempotency is generalized to other endpoints — **API-5**, still open — in
+which case: key, user, endpoint, request fingerprint, stored response, `expires_at`, with
+**unique `(user_id, key)`**. Any `expires_at` there would be a *new* decision about *those*
+endpoints. It must not be retrofitted onto run submission, where an expiring key is precisely
+how an old retry applies progression a second time.
 
 ### `audit_log` — PROPOSED
 Actor, action, target type and id, correlation id, `created_at`, and a metadata
@@ -271,11 +350,12 @@ here.
 
 | Ref | Question |
 | --- | --- |
-| DM-1 | **What form** validated event retention takes — per-event records or per-run derived counts (ANTI-5). *That* some retention exists is no longer in question. |
+| ~~DM-1~~ | **Resolved by ADR-0006 (ANTI-5).** Data minimization: **no `run_events` table**, and no raw per-event history. Validate at submission time and persist compact authoritative facts only. |
 | DM-2 | Weekly window: partitioned table, materialized view, or maintained table (LB-1) |
 | DM-3 | Retention for `runs`, `paw_ledger`, `audit_log` (SEC-3) |
 | DM-4 | What account deletion does to runs and leaderboard entries (LB-5, SEC-3) |
-| DM-7 | Index strategy for the lifetime telemetry-derived counters once real query shapes exist |
+| DM-7 | Index strategy for the lifetime telemetry-derived counters once real query shapes exist. Deferred with the counters themselves — **ANTI-6**. |
+| **ANTI-6** | The four `DERIVED_TELEMETRY` columns on `runs` and `player_progression` are **not created at M9** because nothing in v1 can establish them. **Blocks M11.** |
 
 **Resolved by M0.6:** DM-5 (display-name v1 baseline **APPROVED**) and DM-6 (audio **Option C
 APPROVED** — four columns: `music_volume`, `music_muted`, `effects_volume`, `effects_muted`).
