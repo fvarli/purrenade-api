@@ -277,14 +277,26 @@ jobs:
           pg_lsclusters -h | awk '$1 != "18" {print $1, $2}' | while read -r version name; do
             sudo pg_ctlcluster "$version" "$name" stop || true
           done
+
+          # The runner image does not create a cluster when the package is
+          # installed, so one may not exist yet. Create it with the standard
+          # postgresql-common tooling when absent; never assume it.
+          if ! pg_lsclusters -h | awk '$1 == "18" && $2 == "main" {found = 1} END {exit !found}'; then
+            sudo pg_createcluster 18 main
+          fi
           sudo pg_ctlcluster 18 main start
           PORT="$(pg_lsclusters -h | awk '$1 == "18" && $2 == "main" {print $3}')"
           for _ in $(seq 1 30); do pg_isready -h 127.0.0.1 -p "$PORT" && break; sleep 1; done
 
-          # Verified, not assumed: fail if this is not actually 18.
-          VERSION="$(sudo -u postgres psql -p "$PORT" -tAc 'show server_version')"
-          echo "PostgreSQL server for this job: ${VERSION} on port ${PORT}"
-          case "$VERSION" in 18.*) ;; *) echo "Expected PostgreSQL 18, got ${VERSION}"; exit 1 ;; esac
+          # Verified, not assumed: ask the running server itself, and fail
+          # unless it is major version 18.
+          VERSION="$(sudo -u postgres psql -p "$PORT" -tAc 'SHOW server_version')"
+          VERSION_NUM="$(sudo -u postgres psql -p "$PORT" -tAc 'SHOW server_version_num')"
+          echo "PostgreSQL server for this job: ${VERSION} (server_version_num ${VERSION_NUM}) on port ${PORT}"
+          if [ "$VERSION_NUM" -lt 180000 ] || [ "$VERSION_NUM" -ge 190000 ]; then
+            echo "Expected PostgreSQL 18, got ${VERSION} (${VERSION_NUM})"
+            exit 1
+          fi
           echo "DB_PORT=${PORT}" >> "$GITHUB_ENV"
 
           sudo -u postgres psql -p "$PORT" -v ON_ERROR_STOP=1 <<'SQL'
@@ -299,6 +311,20 @@ jobs:
         run: |
           cp .env.example .env
           php artisan key:generate
+        env:
+          DB_PASSWORD: ci-only-not-a-secret
+
+      - name: The application connects to PostgreSQL 18
+        run: |
+          set -euo pipefail
+          # The connection the migrations, the tests and the concurrency
+          # workers use — not the psql one above.
+          VERSION_NUM="$(php artisan tinker --execute='echo DB::scalar("SHOW server_version_num");' | tail -n 1 | tr -d '[:space:]')"
+          echo "The application's database connection reports server_version_num ${VERSION_NUM}"
+          if ! [[ "$VERSION_NUM" =~ ^18[0-9]{4}$ ]]; then
+            echo "Expected the application to reach PostgreSQL 18, got '${VERSION_NUM}'"
+            exit 1
+          fi
         env:
           DB_PASSWORD: ci-only-not-a-secret
 
