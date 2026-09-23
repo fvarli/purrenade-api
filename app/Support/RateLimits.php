@@ -58,6 +58,14 @@ final class RateLimits
     /** Readiness probing. Public, and the only public route that queries the DB. */
     public const HEALTH = 'api-health';
 
+    /**
+     * Run submission: start and finish (ADR-0006, M9).
+     *
+     * One limiter name, two independent buckets — one per route — so a burst of
+     * starts can never spend the budget a player's own finish needs.
+     */
+    public const GAME_RUNS = 'game-runs';
+
     // --- Per-identifier allowances (per minute unless noted) ---------------
 
     /**
@@ -115,6 +123,22 @@ final class RateLimits
     public const DISPLAY_NAME_PER_IDENTIFIER_DAILY = 3;
 
     public const NORMAL_PER_IDENTIFIER = 60;
+
+    /**
+     * Per minute, per account, per route (start and finish separately).
+     *
+     * The fastest legitimate run ends in about 5–8 seconds, so even a player who
+     * dies instantly and replays at once starts at most 8–12 runs a minute; a
+     * finish on a flaky connection retries about six times a minute on backoff.
+     * 30 is at least 2.5× the legitimate worst case, and still bounds a script.
+     *
+     * **User-scoped only — deliberately no per-source dimension.** Every
+     * browser request reaches this API through the Nuxt BFF, which forwards no
+     * client address, so the source IP here is the BFF's for every player: a
+     * per-IP bucket would be one global bucket shared by the whole player base.
+     * `docs/security/rate-limiting.md` records the finding.
+     */
+    public const GAME_RUN_PER_IDENTIFIER = 30;
 
     /**
      * Per source, per minute. Well above any sane monitor — a probe at one

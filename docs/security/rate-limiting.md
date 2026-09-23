@@ -113,6 +113,28 @@ they are an engineering parameter rather than an open product decision.
 **Numeric values are an M9 implementation parameter**, derived from the conventions in §2 and
 from expected legitimate start/retry behaviour — not guessed, and not left open.
 
+**Implemented at M9:**
+
+| Limiter | Buckets | Value |
+| --- | --- | --- |
+| `game-runs` (`RateLimits::GAME_RUNS`) | `run-start:user:{id}` for `POST /game-runs`; `run-finish:user:{id}` for `POST /game-runs/{runId}/finish` — **separate**, so a start storm can never block the player's own finish | **30 per minute each** (`RateLimits::GAME_RUN_PER_IDENTIFIER`) |
+
+Why 30: the fastest legitimate run ends in about 5–8 s (first hazard 2.5 s, three hearts,
+1.2 s invulnerability), so even instant replays start at most 8–12 runs a minute; a finish on a
+flaky connection retries about six times a minute on the client's backoff. 30 is at least 2.5×
+the legitimate worst case and still bounds a script. The throttle middleware runs before the
+controller, so a `429` never records an idempotency identity; the retry after `Retry-After`
+applies exactly once (tested).
+
+**No per-IP dimension on these routes — an engineering finding, not an omission.** Every
+browser request reaches this API through the Nuxt BFF, which forwards no client address, so the
+source IP Laravel sees is the BFF host's for every player. A per-IP bucket here would be one
+**global** bucket shared by the whole player base. The ADR's "IP as secondary defence" is
+therefore not applied at the API layer; where it is appropriate, it belongs at the BFF or the
+edge. *Observation outside M9 scope:* the existing auth `*_PER_SOURCE` limiters are affected by
+the same fact in production and probably share one bucket — reported to the owner, not changed
+in M9.
+
 ### Admin endpoints — PROPOSED
 
 Rate-limited despite being privileged. A compromised admin credential should not

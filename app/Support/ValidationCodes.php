@@ -57,6 +57,8 @@ final class ValidationCodes
         'NotCompromised' => 'password_compromised',
         'DisplayNameFormat' => 'format_invalid',
         'DisplayNameAvailable' => 'taken',
+        'StrictInteger' => 'type_invalid',
+        'Uuid' => 'format_invalid',
     ];
 
     /**

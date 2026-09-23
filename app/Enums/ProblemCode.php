@@ -79,6 +79,17 @@ enum ProblemCode: string
 
     case DisplayNameChangeCooldown = 'display_name_change_cooldown';
 
+    // --- Game runs -----------------------------------------------------------
+
+    /**
+     * The run is already final — finished under another idempotency key, or
+     * replaced by a later start. Not a low score: a lifecycle violation.
+     */
+    case RunNotActive = 'run_not_active';
+
+    /** The same idempotency key was sent with a different effective request. */
+    case IdempotencyKeyReused = 'idempotency_key_reused';
+
     /**
      * The HTTP status this condition always carries.
      *
@@ -114,7 +125,9 @@ enum ProblemCode: string
             self::EmailAlreadyVerified,
             self::TwoFactorAlreadyEnabled,
             self::TwoFactorNotEnabled,
-            self::TwoFactorNotPending => Response::HTTP_CONFLICT,
+            self::TwoFactorNotPending,
+            self::RunNotActive,
+            self::IdempotencyKeyReused => Response::HTTP_CONFLICT,
 
             self::RateLimited,
             self::VerificationResendCooldown,
@@ -172,6 +185,8 @@ enum ProblemCode: string
             self::AdminTwoFactorRequired => 'Two-factor authentication required for this session',
             self::ResetTokenInvalid => 'Password reset token is invalid or expired',
             self::DisplayNameChangeCooldown => 'Display name was changed too recently',
+            self::RunNotActive => 'The run is no longer active',
+            self::IdempotencyKeyReused => 'Idempotency key was reused with a different request',
         };
     }
 }

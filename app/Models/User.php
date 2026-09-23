@@ -35,6 +35,7 @@ use Laravel\Sanctum\HasApiTokens;
  * @property int $two_factor_version
  * @property-read Collection<int, TwoFactorRecoveryCode> $twoFactorRecoveryCodes
  * @property-read EmailVerificationCode|null $emailVerificationCode
+ * @property-read PlayerProgression|null $progression
  */
 #[Hidden(['password', 'remember_token', 'two_factor_secret'])]
 class User extends Authenticatable implements MustVerifyEmailContract
@@ -103,6 +104,38 @@ class User extends Authenticatable implements MustVerifyEmailContract
     public function twoFactorRecoveryCodes(): HasMany
     {
         return $this->hasMany(TwoFactorRecoveryCode::class);
+    }
+
+    /** @return HasOne<PlayerProgression, $this> */
+    public function progression(): HasOne
+    {
+        return $this->hasOne(PlayerProgression::class);
+    }
+
+    /** @return HasMany<Run, $this> */
+    public function runs(): HasMany
+    {
+        return $this->hasMany(Run::class);
+    }
+
+    // ---------------------------------------------------------------------
+    // Tutorial
+    // ---------------------------------------------------------------------
+
+    /**
+     * Has the first-run tutorial been completed (or skipped)?
+     *
+     * Read from **either** column during the M9 expand/contract relocation
+     * (`docs/architecture/data-model.md` §4.1): `player_progression` is the new
+     * home, and `users.tutorial_completed_at` is still dual-written — and, in
+     * the window between the M9 migration and the PHP-FPM reload, may be the
+     * only column the previous release wrote. Reading either means no player
+     * who finished the tutorial is ever routed back into it.
+     */
+    public function hasCompletedTutorial(): bool
+    {
+        return $this->tutorial_completed_at !== null
+            || $this->progression?->tutorial_completed_at !== null;
     }
 
     // ---------------------------------------------------------------------

@@ -3,11 +3,13 @@
 REST API for **Purrenade**, a browser-first, mobile-first casual endless
 score-attack runner. Laravel · PostgreSQL.
 
-> **Status: authentication shipped.** Laravel, the toolchain and quality gates are in place, and
-> the authentication and access surface is implemented: registration, login, email verification,
-> password reset, TOTP two-factor with recovery codes, `player`/`admin` roles with mandatory admin
-> two-factor, and session/device management. No gameplay endpoint exists yet — run submission is
-> **M9** and is blocked on ADR-0006.
+> **Status: authentication and the run lifecycle.** The authentication and access surface is
+> implemented: registration, login, email verification, password reset, TOTP two-factor with
+> recovery codes, `player`/`admin` roles with mandatory admin two-factor, and session/device
+> management. **M9** adds the server-owned run lifecycle under ADR-0006 — server-started runs
+> with a server-issued seed, a classified finish (accepted / flagged / rejected) that is
+> idempotent and race-safe, and durable progression, with tutorial completion relocated onto
+> it.
 
 ## Local setup
 
@@ -93,12 +95,12 @@ migration, the queue worker and transactional mail — start at
 [`docs/production/README.md`](docs/production/README.md). The frontend half is
 in [`purrenade/docs/production/`](https://github.com/fvarli/purrenade/tree/main/docs/production).
 
-## Two decisions block implementation
+## The two decisions that gated implementation
 
-| ADR | Decision | Blocks |
+| ADR | Decision | Status |
 | --- | --- | --- |
-| [ADR-0005](docs/decisions/ADR-0005-authentication-and-2fa-strategy.md) | Authentication transport and 2FA strategy | M2, M3 — and constrains the approved "Android/iOS must remain possible" requirement |
-| [ADR-0006](docs/decisions/ADR-0006-run-validation-and-anti-cheat-boundary.md) | Run validation / anti-cheat boundary | M9, M10 — the largest architectural risk in v1 |
+| [ADR-0005](docs/decisions/ADR-0005-authentication-and-2fa-strategy.md) | Authentication transport and 2FA strategy | Accepted; implemented at M2/M3 |
+| [ADR-0006](docs/decisions/ADR-0006-run-validation-and-anti-cheat-boundary.md) | Run validation / anti-cheat boundary | Accepted 2026-09-22; implemented at M9. **ANTI-6** stays open and blocks M11 only |
 
 ## Target stack — PROPOSED
 
@@ -116,9 +118,10 @@ Delivered here: **M1** (bootstrap), **M2** (auth core) and **M3** (two-factor, r
 session management) — the last two both shipped in the commit labelled M2, which is why every
 document in this repository dates that work to M2.
 
-The next milestone touching this repository is **M9** (run lifecycle, anti-cheat boundary,
-progression), which is blocked on
-[ADR-0006](docs/decisions/ADR-0006-run-validation-and-anti-cheat-boundary.md).
+**M9** (run lifecycle, anti-cheat boundary, progression persistence) is implemented under
+[ADR-0006](docs/decisions/ADR-0006-run-validation-and-anti-cheat-boundary.md). Its tutorial
+relocation is the expand half of a two-deployment move: the later contract deployment drops
+`users.tutorial_completed_at`.
 
 The roadmap, with the delivery status of every milestone, lives in
 `purrenade/docs/product/milestones.md`.

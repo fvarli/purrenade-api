@@ -72,6 +72,21 @@ These are written deliberately, not hoped for. A read-modify-write on the ledger
 passes every single-threaded test and fails in production the first time a player
 has two tabs open.
 
+**How, since M9.** Two complementary layers:
+
+- **Interleavings inside the feature suite** — two callers holding one snapshot, replayed in
+  sequence inside the rolled-back test transaction. Cheap, and enough for a conditional
+  `UPDATE`.
+- **Real connections in `tests/Concurrency/`** — its own PHPUnit suite, run after Feature and
+  **not** wrapped in `RefreshDatabase`: it commits, and truncates the test schema around each
+  test. Each request runs through the real HTTP stack in its own PHP process
+  (`tests/Concurrency/worker.php`), orchestrated by `Tests\Support\RunWorkers`. A test-only
+  trigger parks one tagged request mid-transaction on an advisory lock at a chosen write, and
+  the orchestrator proceeds only once `pg_stat_activity` shows the other request actually
+  waiting — never on a sleep. A deadlock would surface as a `500` and fails the test. This is
+  how the run lifecycle's partial-index inference, row-lock waits and READ COMMITTED re-select
+  are proven, and it runs on PostgreSQL 18 in CI as well.
+
 ### Abuse cases — APPROVED
 
 | Test | Assertion |
@@ -108,7 +123,7 @@ including the admin `403`.
 | --- | --- |
 | OpenAPI lints | The document is valid |
 | Every route appears in the document | An undocumented endpoint fails CI |
-| Response shapes match the documented schemas | No drift |
+| Response shapes match the documented schemas | No drift. **Implemented at M9** for every run and progression response plus `/auth/me` (`tests/Feature/Runs/RunContractTest.php`, `Tests\Support\OpenApiContract`): an undeclared member is a failure, which is how a leaked ANTI-6 field would be caught |
 | Error responses use the documented envelope and codes | Clients branch on codes |
 
 ---

@@ -52,8 +52,8 @@ shape above; the divergence is recorded here rather than silently reconciled.
 | `locale` | **Not created yet** |
 | `music_volume`, `music_muted`, `effects_volume`, `effects_muted` | **Not created yet** |
 | `deleted_at` | **Not created yet** — it lands with SEC-3 |
-| `role` check constraint | Shipped as an indexed string with a default; the check constraint is outstanding against §7 |
-| — | `tutorial_completed_at` (M8) — temporary, see §4.1 |
+| `role` check constraint | Shipped: an indexed string with a default **and** `users_role_check`, built from the `UserRole` enum |
+| — | `tutorial_completed_at` (M8) — legacy mirror since M9, dual-written until the contract deployment drops it; see §4.1 |
 | — | The 2FA and session columns, per ADR-0005 |
 
 ### `email_verification_codes` — PROPOSED
@@ -80,35 +80,51 @@ selects. **Index:** `(user_id, last_seen_at desc)`.
 
 ## 3. Runs
 
-### `runs` — PROPOSED · M9 column set fixed by ADR-0006
+### `runs` — **IMPLEMENTED (M9)** under ADR-0006
 
-| Column | Notes |
-| --- | --- |
-| `id` | Opaque. It is the run identity a finish call references; there is **no separate run token** — see [`../security/anti-cheat.md`](../security/anti-cheat.md) §3. |
-| `user_id` | FK → `users`. The authenticated actor, resolved from the credential. |
-| `character_id` | FK → `characters` |
-| `started_at` | **Server-recorded**, at run creation, before gameplay. Determines weekly attribution (LB-1). |
-| `finished_at` | Null while `active` |
-| `duration_ms` | Null while `active` |
-| `score` | **Server-authoritative integer.** Null while `active`. |
-| `run_paws` | Paws collected this run — **authoritative**, not the client's claim. Null while `active`. |
-| `seed` | **Server-issued** (RNG-1). Written at creation. |
-| `status` | `active` / `accepted` / `flagged` / `rejected` |
-| `validation_meta` | Structured rule codes and observed-versus-bound values explaining a `flagged` or `rejected` classification. **Never raw events.** |
-| `idempotency_key` | **Unique per user.** Null while `active`; set at finish. |
-| `idempotency_fingerprint` | Hash of the effective finish request. Without it, "same key, different request → `409`" has nothing to compare against. |
+Migration `2026_09_23_100200_create_runs_table`. Lifecycle in
+`App\Services\Runs\RunLifecycleService`.
 
-**Constraints**
-- `status IN ('active', 'accepted', 'flagged', 'rejected')`
-- **`unique (user_id) where status = 'active'`** — a partial unique index. This is what makes
-  "one active run per user" a database invariant rather than a read-then-check query that
-  loses a race (GR-4).
-- `unique (user_id, idempotency_key)` — the single constraint that makes retry-safe
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | `uuid` PK | Opaque (UUIDv7). The run identity a finish call references; there is **no separate run token** — see [`../security/anti-cheat.md`](../security/anti-cheat.md) §3. |
+| `user_id` | `bigint` FK → `users`, **restrict** | The authenticated actor, resolved from the credential. Restrict, because account deletion is OPEN (DM-4) and run history must not vanish as a side effect. |
+| `character_id` | `bigint` FK → `characters.id`, restrict | **Internal** id. The API speaks `characters.key`; the bigint is never serialised. |
+| `status` | `varchar(16)` | `active` / `accepted` / `flagged` / `rejected` |
+| `seed` | `bigint` | **Server-issued** (RNG-1), uint32 `0..4294967295`, from the CSPRNG. `bigint` because PostgreSQL `integer` is signed 32-bit. |
+| `started_at` | `timestamp(3)` | **Server-recorded**, at run creation, before gameplay. Determines weekly attribution (LB-1). |
+| `finished_at` | `timestamp(3)` null | The server's **finalisation (receive) time** — not the moment play ended. Null while `active`. |
+| `duration_ms` | `integer` null | The **claimed** simulated play time, kept once it passes structural validation. Not a server clock fact. Null while `active` and on `rejected`. |
+| `score` | `integer` null | The score as classified. Null while `active` and on `rejected`. Counts toward progression only when `accepted`. |
+| `run_paws` | `integer` null | Paws as classified. Null while `active` and on `rejected`. |
+| `validation_meta` | `jsonb` null | `{v, window_ms, rules: [{code, observed?, bound?, field?}]}` — `window_ms` is `finished_at − started_at`, the server's own upper bound. **Never raw events.** |
+| `result` | `jsonb` null | The `RunResult` payload the finish produced, replayed verbatim for the same idempotency key (GR-3). Server-decided data only. |
+| `idempotency_key` | `uuid` null | Set at finish. Null while `active` and for a stale-replaced run. |
+| `idempotency_fingerprint` | `char(64)` null | `sha256("finish:v1\n" + run_id + "\n" + duration + "\n" + score + "\n" + paws)`. What makes "same key, different request → `409`" enforceable. |
+| `created_at`, `updated_at` | `timestamp(3)` | |
+
+**Constraints (all shipped)**
+- `runs_status_check` — the four statuses, built from the `RunStatus` enum.
+- `runs_seed_check` — `seed BETWEEN 0 AND 4294967295`.
+- `runs_active_shape_check` — `active` exactly when `finished_at IS NULL`, and an active run
+  carries no score, paws, duration, key or result.
+- `runs_counted_shape_check` — `accepted` and `flagged` carry all of them.
+- `runs_finished_order_check` — `finished_at >= started_at`.
+- `runs_values_check` — `score >= 0`, `run_paws >= 0`, `duration_ms > 0` where present.
+- `runs_idem_pair_check` — key and fingerprint are set together.
+- **`runs_one_active_per_user`: `UNIQUE (user_id) WHERE status = 'active'`** — the partial
+  unique index that makes "one active run per user" a database invariant rather than a
+  read-then-check query that loses a race (GR-4). Start inserts with
+  `ON CONFLICT (user_id) WHERE status = 'active' DO NOTHING`, whose predicate matches the
+  index so PostgreSQL infers it as the arbiter.
+- **`UNIQUE (user_id, idempotency_key)`** — the single constraint that makes retry-safe
   submission real rather than hoped for (GR-3). The identity lives here for the life of the
   run record; **there is no cleanup window**, so an old retry can never apply progression
-  twice.
-- `score >= 0`; `run_paws >= 0`; `duration_ms > 0`; `finished_at >= started_at` — each
-  applying to finished rows.
+  twice. NULLs are distinct, so active and stale-replaced runs coexist.
+
+**No time-based expiry.** An `active` run older than 24 hours is normal: it stays active, and
+its finish is accepted, until the same player starts again (`RUN_STALE_REPLACEMENT_AFTER`,
+[`../security/anti-cheat.md`](../security/anti-cheat.md) §3B).
 
 **No `run_events` table, and no raw per-event history.** See below.
 
@@ -123,9 +139,10 @@ adopted from a client summary counter. See
 [`../security/anti-cheat.md`](../security/anti-cheat.md) §2.1.
 
 The contract makes this structural: the request carries only
-`FinishRunRequest.telemetry.reported_*` (untrusted hints), while the authoritative values are
-returned in `RunResult.derived_facts` and persisted from there. **No column on this table is
-ever written directly from a client-supplied field.**
+`FinishRunRequest.telemetry.reported_*` (untrusted hints). At M9 the three that exist —
+duration, score, paws — are persisted only as **classified claims**, after structural
+validation, and move progression only when the run is `accepted`. Layers 1 and 2 allow no
+stronger derivation of score and paws; that residual is accepted by ADR-0006.
 
 #### Four columns deliberately absent at M9 — ANTI-6
 
@@ -144,10 +161,11 @@ retroactively either. Adding nullable counter columns later is an ordinary expan
 
 Tracked as **ANTI-6**, which blocks **M11** only.
 
-**Indexes**
-- `(user_id, created_at desc)` — profile history
-- `(status, score desc)` partial on `status = 'accepted'` — all-time ranking
-- `(status, started_at, score desc)` partial on `status = 'accepted'` — weekly ranking
+**Indexes.** M9 ships only the two unique ones above. The query indexes follow their queries
+(gate D5), so they arrive with M10:
+- `(user_id, created_at desc)` — profile history — **PROPOSED, M10**
+- `(status, score desc)` partial on `status = 'accepted'` — all-time ranking — **PROPOSED, M10**
+- `(status, started_at, score desc)` partial on `status = 'accepted'` — weekly ranking — **PROPOSED, M10**
 
 ### `run_events` — **not created** (DM-1 resolved, ANTI-5)
 
@@ -173,8 +191,15 @@ SEC-5). It is not implied by ANTI-6 being resolved later.
 
 ## 4. Progression
 
-### `player_progression` — PROPOSED · M9 column set fixed by ADR-0006
-One row per user.
+### `player_progression` — **IMPLEMENTED (M9)** under ADR-0006
+One row per user: `user_id` is the primary key and an FK → `users` with **cascade** (the row is
+fully derived). Migration `2026_09_23_100100_create_player_progression_table`. Types:
+`lifetime_paws bigint`, `loli_cycle_paws smallint`, `best_score integer`, `run_count integer`,
+`tutorial_completed_at timestamp(0)`. `player_progression_values_check` enforces every range.
+
+The row is created idempotently by `ProgressionService::ensure()` — at registration, and as an
+autocommitted statement before any run transaction opens (lock order C-1). A missing row reads
+as zeros; reads never write.
 
 **The M9 column set:**
 
@@ -184,7 +209,7 @@ One row per user.
 | `loli_cycle_paws` | `DERIVED_PERSISTENT` | `0..199`. **Check constraint enforces the range.** |
 | `best_score` | `DERIVED_PERSISTENT` | **Büşo's approved criterion** (≥ 2,500) |
 | `run_count` | `DERIVED_PERSISTENT` | Accepted runs only. **Ogito's approved criterion** (10). No duration filter. |
-| `tutorial_completed_at` | — | Null until first completion; **not** re-stamped on replay. **Lives on `users` until M9** — see §4.1 |
+| `tutorial_completed_at` | — | Null until first completion; **not** re-stamped on replay. **Relocated here at M9** — see §4.1 |
 
 Every column here is a **`PERSISTED_AGGREGATE`** by progress persistence. The Verification
 Source column records something different — where the *evidence* came from. Every M9 column is
@@ -211,7 +236,24 @@ The naming rule below is why this matters: storing a total never reclassifies wh
 evidence came from, so a `DERIVED_TELEMETRY` counter cannot be quietly laundered into a
 `DERIVED_PERSISTENT` one by being written to a table.
 
-### 4.1 `tutorial_completed_at` is on `users` until M9 — APPROVED (M8)
+### 4.1 `tutorial_completed_at` relocation — APPROVED (M8), expand shipped at M9
+
+**State after M9 (the expand deployment):**
+
+| Step | Status |
+| --- | --- |
+| 1 Create `player_progression` with `tutorial_completed_at` | **Done** — same type as the source, `timestamp(0)` |
+| 2 Backfill from `users.tutorial_completed_at`, exactly | **Done** — one set-based `INSERT … SELECT … ON CONFLICT DO NOTHING` |
+| 2a Assert the backfill | **Done inside the migration**: it throws, rolling back, unless every user has a row whose timestamp `IS NOT DISTINCT FROM` the source. The production check is therefore part of `migrate --force`. |
+| 3 Repoint the write and the read | **Done, with compatibility:** `ProgressionService::completeTutorial()` **dual-writes** — progression, then the `users` mirror, same instant, both conditional on `IS NULL`. Every read (`/auth/me`, `/progression/tutorial`, `/progression`, the run result) is **either column non-null** (`User::hasCompletedTutorial()`), which covers the previous release writing only `users` between migrate and reload. |
+| 4 Verify in production | After the M9 deploy |
+| C1 Contract, later deployment | Re-backfill stragglers (`IS NULL` guarded), then progression-only code; remove the `users` cast |
+| C2 Contract, later separate deployment | Drop `users.tutorial_completed_at`; `down()` re-adds and repopulates it from progression |
+
+**`users.tutorial_completed_at` is deliberately not dropped in M9.** Rolling the code back to
+the pre-M9 release is safe until C1, because `users` is still written.
+
+The original M8 reasoning follows.
 
 The table above is still where this column **belongs**: Progression owns tutorial
 completion ([`domain-boundaries.md`](domain-boundaries.md) §4), and M8 did not change
@@ -265,14 +307,23 @@ belongs to the run-validation system, not to a second hidden duration rule compe
 submission transaction. Never read-modify-write in application code — that is the
 lost-update bug this table would otherwise produce under two tabs.
 
-### `paw_ledger` — PROPOSED
-Append-only: `user_id`, `run_id`, `delta`, `resulting_cycle`, `bonuses_triggered`,
-`created_at`. (`user_id` was absent from this list while the index below already led with it.)
+### `paw_ledger` — **IMPLEMENTED (M9)**
+Append-only: `id`, `user_id` (FK restrict), `run_id` (uuid FK restrict, **UNIQUE** — a run
+credits the ledger at most once), `delta integer > 0`, `resulting_cycle smallint 0..199`,
+`bonuses_triggered integer >= 0`, `created_at timestamp(3)`.
 
-**Only an `accepted` run appends to it.**
+**Only an `accepted` run with `run_paws > 0` appends to it**, in the finish transaction after
+the progression update.
+
+**`bonuses_triggered` is threshold-crossing accounting only:** `floor((previous_cycle +
+delta) / 200)`, which can exceed 1. It is **not** a Loli Bonus activation — queued bonuses are
+run-scoped and can expire unstarted, so *threshold crossed ≠ Loli activated*. Nothing may
+derive `lifetime_loli_activations`, Sero's progress or any ANTI-6 fact from it. The column
+carries a `COMMENT` saying so.
 
 An append-only ledger makes the paw total auditable and lets a disputed
-progression state be reconstructed. **Index:** `(user_id, created_at desc)`.
+progression state be reconstructed. **Index:** `(user_id, created_at desc)` — **PROPOSED**,
+added when a query needs it.
 
 ### `achievements` — PROPOSED
 Catalogue: key, target value, hidden flag, display order.
@@ -283,8 +334,12 @@ Catalogue: key, target value, hidden flag, display order.
 **Unique `(user_id, achievement_id)`** — this is what makes unlocking idempotent.
 `progress` is monotonic; it never decreases.
 
-### `characters` — PROPOSED
-Key, unlock criterion type and value, `artwork_available` flag.
+### `characters` — **IMPLEMENTED (M9), minimal**
+`id bigint` (internal), `key varchar(32)` **unique** with `characters_key_check`
+(`^[a-z0-9_]{1,32}$`; the public `character_id`), `is_starter`, `artwork_available`,
+`display_order`. The four APPROVED characters are written **by the migration**, not a seeder:
+`aysenur` (starter, artwork), `buso`, `ogito`, `sero` (neither). M9's selectable-for-a-new-run
+rule is generic: `is_starter AND artwork_available`. **Unlock criterion columns are M11.**
 
 `artwork_available` encodes the **second unlock gate**: v0.3 states characters
 unlock "when the friend artwork is added". A character is selectable only when

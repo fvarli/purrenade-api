@@ -116,7 +116,7 @@ it can be hit by two tabs at once.
 | Double threshold trigger | The bonus count is derived from the ledger's atomic result, not computed separately |
 | Duplicate achievement unlock | Unique constraint on `(player, achievement)`; the insert is idempotent |
 | Duplicate run submission | Idempotency key with a unique constraint |
-| Two concurrent runs on one account | Each submission is independent and idempotent; ordering is whatever the server accepts. See ADR-0006 for whether a stricter rule is required. |
+| Two concurrent runs on one account | **Impossible by construction (GR-4):** a partial unique index allows one active run per user; start inserts with `ON CONFLICT … WHERE status = 'active' DO NOTHING` and a concurrent start resumes the winner. Lock order RUN → PLAYER_PROGRESSION → PAW_LEDGER everywhere — see `RunLifecycleService` and [`../security/anti-cheat.md`](../security/anti-cheat.md) §3B. |
 
 ---
 

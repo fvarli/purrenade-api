@@ -71,6 +71,18 @@ not** introduced to eliminate the difference — Docker is not part of this proj
 A dedicated **PG18 compatibility gate** is added before database-sensitive product work (M9).
 The local cluster may be upgraded natively before then; nothing in M1 depends on it.
 
+**M9: the gate exists.** CI's `pg18` job installs PostgreSQL 18 natively from the PostgreSQL
+project's apt repository, verifies the server reports `18.*`, and runs the migrations, the
+whole suite — including the real-connection concurrency suite that exercises the
+partial-index `ON CONFLICT` inference and READ COMMITTED re-select the run lifecycle relies
+on — and a full rollback round-trip. The `app` job keeps running on the runner's default
+version, so both 16-class and 18 behaviour are gated.
+
+**M9 dev dependency:** `symfony/yaml ^8.1` (resolved 8.1.6, matching the installed Symfony 8.1
+line; verified 2026-09-23). Test-only: the OpenAPI conformance tests parse
+`docs/api/openapi.draft.yaml` with it. Chosen over a third-party OpenAPI-validator package
+(C-9) because the conformance check needed is small and in-repo.
+
 ### Not installed at M1
 
 | Package | Milestone |

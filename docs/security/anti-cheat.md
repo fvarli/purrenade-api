@@ -239,7 +239,96 @@ locking one would encode an arithmetic the connectivity decision has already mad
 derivation; the clock-skew and late-submission tolerance; how long after `started_at` a
 finish may legitimately arrive; and whether a claimed duration exceeding the server-observed
 upper bound rejects or flags once that tolerance model exists — constrained by the rule above
-that nothing tuning-dependent may reject.
+that nothing tuning-dependent may reject. **Resolved at M9 — see §3B.**
+
+---
+
+## 3B. The M9 validation model — IMPLEMENTED (M9 engineering parameters)
+
+`App\Services\Runs\RunValidator`, a pure classifier (no database, clock or HTTP), bounds in
+`config/game_runs.php`. Each rule is labelled with what kind of number it rests on.
+
+### Time
+
+- `started_at` — server clock, at creation. `finished_at` — server clock, at **finalisation**
+  (receive time), explicitly **not** asserted to be the end of play.
+- `validation_meta.window_ms = finished_at − started_at` — the server's own upper bound on
+  play time.
+- `duration_ms` — the **claimed** simulated play time (the frontend's `elapsedMs` excludes the
+  ready beat, pauses and dropped catch-up steps, so it can only be ≤ wall time). Kept once it
+  passes the structural check; used only by flag-only checks; never a clock fact.
+- **`RUN_DURATION_TOLERANCE_MS = 5000`** — deliberate slack against server clock steps (NTP).
+  It only loosens the rejection below.
+- **Late arrival is never a reason to flag.** A finish on a run that is still `active` is
+  classified however late it arrives.
+
+### Rules
+
+| Order | Code | Outcome | Condition | Basis |
+| --- | --- | --- | --- | --- |
+| 0 | — | **422** | a telemetry member missing or not a JSON **integer** (string, float incl. `12.0`, bool, null, object, beyond int64) | protocol (C-7) |
+| 1 | `value_out_of_domain` | **reject** | any member `< 0` or `> 2147483647` | STRUCTURAL — the stored domain. Evaluated alone. |
+| 2 | `duration_non_positive` | **reject** | `duration == 0` | STRUCTURAL — ADR "non-positive durations" |
+| 2 | `duration_exceeds_server_window` | **reject** | `duration > window_ms + 5000` | STRUCTURAL — simulated time cannot exceed server wall time |
+| 2 | `score_below_paw_floor` | **reject** | `score < 10 × run_paws` | STRUCTURAL — `perPaw` is APPROVED and LOCKED at 10; every multiplier ≥ 1 |
+| 3 | `score_rate_high` | flag | `score / s > 80` | PROPOSED speed and spawn tuning (theoretical max ≈ 78.6) |
+| 3 | `paw_rate_high` | flag | `paws / s > 3` | PROPOSED peak spawn ≤ 2.08/s |
+| 3 | `score_below_duration_floor` | flag | `score / s < 5` | half the PROPOSED `distancePerSecond` 10 |
+| 3 | `duration_below_minimum` | flag | `duration < 4000 ms` | below the PROPOSED fastest three-heart loss (≈ 4900 ms) |
+
+Every hit in a class is recorded; a rejected run is not also evaluated for flags. Rates are
+compared in integer arithmetic. **Not implemented:** deviation from the player's own history —
+there is no approved basis, and it would flag legitimate improvement.
+
+`validation_meta` keeps `{v: 1, window_ms, rules: [{code, observed, bound, field?}]}` — the
+minimum needed to explain the classification, never raw events.
+
+### What a rejected or flagged run keeps
+
+| | `accepted` | `flagged` | `rejected` |
+| --- | --- | --- | --- |
+| `status`, `finished_at`, `validation_meta`, key, fingerprint, `result` | yes | yes | yes |
+| `score`, `run_paws`, `duration_ms` on the row | yes | yes | **null** (the observed values are in `validation_meta`) |
+| Progression, ledger, best score, `run_count` | **mutated** | untouched | untouched |
+
+### `RUN_STALE_REPLACEMENT_AFTER = 24 h` — how the "maximum active-run lifetime" is realised
+
+**Not an expiry.** There is no scheduler and no time-based transition. An active run nobody
+touches stays `active` indefinitely and its finish stays acceptable. The threshold acts only
+when the **same player calls start**:
+
+- run started less than 24 h ago → start **resumes** it (200);
+- 24 h or older → start **may replace** it — marking it `rejected` with rule
+  `run_stale_replaced` and creating the new run **in one transaction** — but only when the new
+  run can actually be created. A start that asks for an unavailable character is refused with
+  `422 character_unavailable` and the stale run stays active and untouched (C-11).
+
+A finish from another device that arrives after a replacing start gets `409 run_not_active`.
+Why 24 h: it bounds seed reuse through repeated resume to one day, and it never replaces a
+legitimately pending finish from the same session, because the client resolves its pending
+finish before it starts.
+
+### Start and character (C-11)
+
+1. **Shape first:** `character_id` must be a JSON string matching `^[a-z0-9_]{1,32}$` →
+   otherwise `422`, even when an active run exists. No catalogue check here.
+2. **Recovery beats availability:** a non-stale active run is returned unchanged with its own
+   original character, whatever key was requested — locked or unknown included.
+3. **Availability only on creation:** `characters.key = ? AND is_starter AND
+   artwork_available`, a plain unlocked read inside the start transaction, after the run
+   lock. Not found → rollback, `422 character_unavailable`.
+
+The requested character is untrusted input and only a preference for a new run. Knowing
+another character's key gains nothing: it is either irrelevant (recovery) or refused
+(creation).
+
+### Lock order and races
+
+Global order **RUN → PLAYER_PROGRESSION → PAW_LEDGER**; start never locks progression; the
+progression row is ensured by an autocommitted statement before either transaction opens. Start
+re-issues its locked active-run select once when it comes back empty, so under READ COMMITTED a
+run committed while it waited is resumed rather than missed. The races are exercised on real
+concurrent connections in `tests/Concurrency/RunConcurrencyTest.php`.
 
 ---
 
@@ -304,8 +393,9 @@ Starting while an active run exists returns **that same run** — same identity,
 same `started_at`. Deterministic resume, never a second run. That is also what a player who
 reloads after a connectivity drop needs.
 
-A **maximum active-run lifetime** exists so the single slot cannot be held indefinitely; its
-value is an M9 implementation parameter.
+A **maximum active-run lifetime** exists so the single slot cannot be held indefinitely. M9
+realises it as `RUN_STALE_REPLACEMENT_AFTER = 24 h`, applied only when the same player starts
+again — never as an expiry. See §3B.
 
 **The tutorial is not an authoritative normal run** and does not occupy the slot.
 

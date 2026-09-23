@@ -19,9 +19,9 @@ Host-specific values appear as `<placeholder>`.
 
 **The version gap is a known, accepted deviation — not an error to correct by
 rewriting the target.** The project targets 18.x; production currently runs
-16.15; a dedicated PostgreSQL 18 compatibility gate lands before
-database-sensitive product work at M9. CI records the same gap explicitly rather
-than hiding it.
+16.15. Since M9, CI runs a dedicated PostgreSQL 18 compatibility job alongside
+the default one, so the product's database-sensitive behaviour is gated on both.
+CI records the gap explicitly rather than hiding it.
 
 The application role is least-privilege by construction:
 

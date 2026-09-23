@@ -174,7 +174,7 @@ and is not a Purrenade health endpoint.
 
 | # | Current state | Position |
 | --- | --- | --- |
-| 1 | **PostgreSQL 16.15 in production; the project target is 18.x** | A known, accepted deviation. The target is **not** rewritten to 16. A dedicated PG18 compatibility gate lands before database-sensitive product work at M9. |
+| 1 | **PostgreSQL 16.15 in production; the project target is 18.x** | A known, accepted deviation. The target is **not** rewritten to 16. Since M9 the CI `pg18` job gates PostgreSQL 18 compatibility alongside the default version. |
 | 2 | Backend deployment is in-place rather than release-directory based; the controlled production deployment path has been proven end-to-end | Preserve the documented failure-boundary and recovery model. **OPS-3 is COMPLETE**; manual deployment remains the fallback. |
 | 3 | Restart/reboot survival and manual resource baseline | **OPS-5 is complete:** a controlled reboot proved automatic recovery of the API runtime and queue, with health, database, migrations and queue state healthy afterwards. The frontend-owned BFF filesystem session store also preserved an existing authenticated browser session. The verified manual baseline is run after controlled restart, monthly and on symptoms; see the [frontend operations procedure](https://github.com/fvarli/purrenade/blob/main/docs/production/operations.md#8-restart-reboot-and-resource-monitoring). |
 | 4 | One queue worker, database driver | Correct at this volume; revisit with queue depth (QJ-*) |

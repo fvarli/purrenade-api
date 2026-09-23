@@ -43,6 +43,7 @@ final class RateLimitServiceProvider extends ServiceProvider
         $this->registerSensitiveLimiter();
         $this->registerDisplayNameLimiter();
         $this->registerNormalLimiter();
+        $this->registerGameRunLimiter();
     }
 
     private function registerLoginLimiter(): void
@@ -174,6 +175,27 @@ final class RateLimitServiceProvider extends ServiceProvider
                 ->by('health:'.$request->ip())
                 ->response($this->refuse()),
         ]);
+    }
+
+    /**
+     * Run start and finish (M9).
+     *
+     * The bucket is chosen by route, so start and finish never share one. The
+     * throttle middleware runs before the controller, so a refusal happens
+     * before any idempotency identity is recorded: a finish refused with 429 is
+     * retried later with the same key and applies exactly once.
+     */
+    private function registerGameRunLimiter(): void
+    {
+        RateLimiter::for(RateLimits::GAME_RUNS, function (Request $request): array {
+            $bucket = $request->route()?->getName() === 'game-runs.finish' ? 'run-finish' : 'run-start';
+
+            return [
+                Limit::perMinute(RateLimits::GAME_RUN_PER_IDENTIFIER)
+                    ->by($bucket.':'.$this->userKey($request))
+                    ->response($this->refuse()),
+            ];
+        });
     }
 
     /**

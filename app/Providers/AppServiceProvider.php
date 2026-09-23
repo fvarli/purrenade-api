@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace App\Providers;
 
+use App\Services\Runs\RunValidationBounds;
+use App\Services\Runs\RunValidator;
 use App\Support\EnvironmentGuard;
 use Illuminate\Http\Middleware\TrustProxies;
 use Illuminate\Http\Request;
@@ -16,7 +18,11 @@ class AppServiceProvider extends ServiceProvider
      */
     public function register(): void
     {
-        //
+        // The validator is pure and takes its bounds as a value object, so it
+        // is built here — the one place that reads `config/game_runs.php` for it.
+        $this->app->singleton(RunValidator::class, fn (): RunValidator => new RunValidator(
+            RunValidationBounds::fromConfig((array) config('game_runs')),
+        ));
     }
 
     /**

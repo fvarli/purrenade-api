@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use App\Models\PlayerProgression;
 use App\Models\User;
 
 use function Pest\Laravel\postJson;
@@ -28,7 +29,10 @@ it('records completion for the authenticated player', function (): void {
 
     $user->refresh();
 
-    expect($user->tutorial_completed_at)->not->toBeNull();
+    // Both storage columns during the M9 relocation: the new home, and the
+    // legacy mirror that keeps a rollback to the previous release safe.
+    expect($user->tutorial_completed_at)->not->toBeNull()
+        ->and($user->progression?->tutorial_completed_at)->not->toBeNull();
 });
 
 it('does not re-stamp a completion that already happened', function (): void {
@@ -94,7 +98,8 @@ it('refuses an unauthenticated caller', function (): void {
         ->assertStatus(401)
         ->assertJsonPath('code', 'unauthenticated');
 
-    expect(User::query()->whereNotNull('tutorial_completed_at')->count())->toBe(0);
+    expect(User::query()->whereNotNull('tutorial_completed_at')->count())->toBe(0)
+        ->and(PlayerProgression::query()->whereNotNull('tutorial_completed_at')->count())->toBe(0);
 });
 
 it('requires a verified address', function (): void {
@@ -105,7 +110,8 @@ it('requires a verified address', function (): void {
         ->assertStatus(403)
         ->assertJsonPath('code', 'email_not_verified');
 
-    expect($user->refresh()->tutorial_completed_at)->toBeNull();
+    expect($user->refresh()->tutorial_completed_at)->toBeNull()
+        ->and($user->progression?->tutorial_completed_at)->toBeNull();
 });
 
 it('cannot be aimed at another player', function (): void {
@@ -127,7 +133,9 @@ it('cannot be aimed at another player', function (): void {
         ->assertOk();
 
     expect($actor->refresh()->tutorial_completed_at)->not->toBeNull()
-        ->and($victim->refresh()->tutorial_completed_at)->toBeNull();
+        ->and($actor->progression?->tutorial_completed_at)->not->toBeNull()
+        ->and($victim->refresh()->tutorial_completed_at)->toBeNull()
+        ->and($victim->progression?->tutorial_completed_at)->toBeNull();
 });
 
 it('ignores fields the endpoint does not accept', function (): void {

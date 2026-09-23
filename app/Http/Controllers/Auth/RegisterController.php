@@ -14,6 +14,7 @@ use App\Models\User;
 use App\Notifications\VerifyEmailNotification;
 use App\Services\Auth\EmailVerificationService;
 use App\Services\Auth\SessionIssuer;
+use App\Services\Progression\ProgressionService;
 use App\Support\AuthLog;
 use App\Support\DeviceLabel;
 use Illuminate\Database\UniqueConstraintViolationException;
@@ -36,6 +37,7 @@ final class RegisterController extends Controller
     public function __construct(
         private readonly EmailVerificationService $verification,
         private readonly SessionIssuer $sessions,
+        private readonly ProgressionService $progression,
     ) {}
 
     public function __invoke(RegisterRequest $request): JsonResponse
@@ -56,6 +58,11 @@ final class RegisterController extends Controller
                 $user->password = (string) $request->string('password');
                 $user->role = UserRole::Player;
                 $user->save();
+
+                // Every player has a progression row from the start. Inside
+                // this transaction, which touches no run, so it cannot take part
+                // in the run lock order.
+                $this->progression->ensure($user->id);
 
                 $code = $this->verification->issue($user);
 

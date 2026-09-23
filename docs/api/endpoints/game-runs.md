@@ -5,8 +5,9 @@ asks the server to change durable, publicly ranked state.
 
 **The validation model is DECIDED** —
 [ADR-0006](../../decisions/ADR-0006-run-validation-and-anti-cheat-boundary.md) was accepted
-on 2026-09-22. Layer 1 + Layer 2 ship in v1. Contract shape only; neither endpoint is
-implemented yet (M9).
+on 2026-09-22. Layer 1 + Layer 2 ship in v1. **Both endpoints are implemented (M9).** The
+wire contract is `docs/api/openapi.draft.yaml`; the M9 wire summary is the next section, and
+the validation rules are [`../../security/anti-cheat.md`](../../security/anti-cheat.md) §3B.
 
 ---
 
@@ -16,6 +17,56 @@ implemented yet (M9).
 | --- | --- | --- | --- | --- |
 | POST | `/game-runs` | authenticated + verified | no | submission |
 | POST | `/game-runs/{runId}/finish` | authenticated + verified | **yes, required** | submission |
+
+---
+
+## M9 wire summary — IMPLEMENTED
+
+Every success body is wrapped in `{"data": …}`; every error is an RFC 9457 problem.
+
+**Start** — `POST /game-runs`, body `{"character_id": "aysenur"}`.
+
+```json
+{"data": {"run_id": "0199…", "character_id": "aysenur", "seed": 123456789,
+          "started_at": "2026-09-23T12:00:00.000Z", "loli_cycle_paws": 37}}
+```
+
+| Situation | Response |
+| --- | --- |
+| `character_id` missing, not a JSON string, or not `^[a-z0-9_]{1,32}$` | `422` — **always**, even with an active run |
+| Active run started < 24 h ago | `200`, **that run unchanged** — its own `run_id`, `seed`, `started_at` and **original `character_id`**, whatever was requested |
+| No active run (or a stale one) and the character is not selectable for a new run | `422`, field code `character_unavailable`; **nothing written** — a stale run stays active |
+| No active run, selectable character | `201`, new run |
+| Active run 24 h or older, selectable character | `201`, new run; the old run becomes `rejected` / `run_stale_replaced` **in the same transaction** |
+
+`seed` is a JSON integer in `0..4294967295` (uint32). `started_at` is UTC with millisecond
+precision. A resume is signalled by the status code alone; the client must not present it as
+a fresh run, and mid-run state is never restored (no input log).
+
+**Finish** — `POST /game-runs/{runId}/finish`, header `Idempotency-Key: <uuid>`, body
+`{"telemetry": {"reported_duration_ms": int, "reported_score": int, "reported_run_paws": int}}`.
+
+```json
+{"data": {"run_id": "0199…", "status": "accepted", "score": 1000, "run_paws": 50,
+          "is_personal_best": true, "previous_best_score": 0, "reasons": [],
+          "progression": {"lifetime_paws": 50, "loli_cycle_paws": 50, "loli_threshold": 200,
+                          "best_score": 1000, "run_count": 1, "tutorial_completed": true},
+          "achievements_unlocked": [], "characters_unlocked": []}}
+```
+
+| Situation | Response |
+| --- | --- |
+| A telemetry member missing or not a JSON **integer**; missing or non-UUID key | `422`; nothing recorded, run stays active |
+| `runId` not a UUID, unknown, or another player's | `404`, indistinguishably |
+| Same key, same effective request | `200`, the **stored** result; zero writes |
+| Same key, different run or telemetry | `409 idempotency_key_reused` |
+| Run already final (other key, or replaced by a later start) | `409 run_not_active` |
+| Classified | `200` with `status` `accepted` / `flagged` / `rejected` and stable `reasons` |
+
+`score` and `run_paws` are `null` for `rejected`. The effective request is the run and the three
+integers; **any other member is ignored** — not persisted, not fingerprinted — including every
+ANTI-6 counter. `achievements_unlocked` and `characters_unlocked` are always `[]` until M11.
+`is_personal_best` is true only for an accepted run that beat the previous best.
 
 ---
 
@@ -57,8 +108,9 @@ credential, never from the body.
 
 Starting never creates a second run. Returning the existing one is deterministic resume, and
 it is what a player who reloads after a connectivity drop needs. A **maximum active-run
-lifetime** exists so the slot cannot be held indefinitely; its value is an M9 implementation
-parameter.
+lifetime** exists so the slot cannot be held indefinitely: M9 realises it as
+`RUN_STALE_REPLACEMENT_AFTER = 24 h`, which acts **only when the same player starts again** —
+it is not an expiry, and an untouched active run stays finishable. See the wire summary above.
 
 **The tutorial is not an authoritative normal run** and does not occupy the slot.
 
@@ -115,7 +167,11 @@ A partial application is a corrupted account.
 — see Outcomes below.
 
 At M9, steps 3 and 4 are inert: achievements and character unlocks arrive at M11, and the
-counters several of them need are blocked on **ANTI-6**.
+counters several of them need are blocked on **ANTI-6**. What M9 does apply, for an accepted run
+only, in one transaction: `lifetime_paws += run_paws`, `loli_cycle_paws = (cycle + run_paws) %
+200`, `best_score = GREATEST(best_score, score)`, `run_count += 1`, and one ledger row when
+`run_paws > 0` with `bonuses_triggered = floor((cycle + run_paws) / 200)` — threshold crossings,
+**never** Loli activations.
 
 ### Concurrency — APPROVED
 
@@ -322,9 +378,9 @@ useful abuse signal.
 | Normal mobile retry behaviour stays practical | A player on a flaky connection must not be locked out of their own result |
 | An idempotent retry creates no duplicate state | And a `429` does not consume the idempotency slot |
 
-**Numeric values are an M9 implementation parameter**, derived from the existing conventions
-and expected legitimate start/retry behaviour, and they live in the central configuration —
-never as controller literals. Tests must cover enforcement. See
+**Implemented at M9:** 30 per minute per user, in separate start and finish buckets, defined in
+`App\Support\RateLimits` — never as controller literals, and covered by tests. No per-IP
+dimension at the API: behind the BFF every player shares one source address. See
 [`../../security/rate-limiting.md`](../../security/rate-limiting.md).
 
 ---

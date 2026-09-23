@@ -126,6 +126,18 @@ jobs:
         env:
           DB_PASSWORD: ci-only-not-a-secret
 
+      - name: Every migration rolls back and re-applies
+        run: |
+          set -euo pipefail
+          # `down()` is only real if it runs. The M9 migrations first — the
+          # newest, and the ones a deploy would roll back — then a full
+          # refresh, which runs every `down()` in reverse and every `up()` again.
+          DB_SEARCH_PATH=purrenade_test php artisan migrate:rollback --step=4 --force
+          DB_SEARCH_PATH=purrenade_test php artisan migrate --force
+          DB_SEARCH_PATH=purrenade_test php artisan migrate:refresh --force
+        env:
+          DB_PASSWORD: ci-only-not-a-secret
+
       - name: Configuration and routes survive caching
         run: |
           set -euo pipefail
@@ -222,8 +234,93 @@ jobs:
         run: |
           echo "CI PostgreSQL : ${{ steps.pg.outputs.server_version }}"
           echo "Project target: 18.x"
-          echo "Known, intentional gap. A dedicated PG18 compatibility gate lands"
-          echo "before database-sensitive product work at M9."
+          echo "Known, intentional gap, matching production (16.15). The 'pg18' job"
+          echo "runs the same suite against PostgreSQL 18."
+
+  # -------------------------------------------------------------------------
+  # PostgreSQL 18 compatibility (M9).
+  #
+  # Production runs 16.15; the project target is 18. M9 is the first
+  # database-sensitive product work — partial unique indexes, `ON CONFLICT`
+  # inference against a partial index, row-lock and READ COMMITTED behaviour
+  # the run lifecycle depends on — so the whole suite, the concurrency suite
+  # included, runs on 18 as well as on the runner's default.
+  #
+  # Native install from the PostgreSQL project's own apt repository (PGDG),
+  # not a container: Docker is not a dependency of this project, in CI either.
+  # -------------------------------------------------------------------------
+  pg18:
+    name: PostgreSQL 18 compatibility
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
+        with:
+          php-version: ${{ env.PHP_VERSION }}
+          extensions: pdo_pgsql, pgsql, mbstring, xml, curl, zip, bcmath, intl
+          coverage: none
+
+      - name: Install and start PostgreSQL 18
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends postgresql-common
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          sudo apt-get install -y --no-install-recommends postgresql-18 postgresql-client-18
+
+          # Run only the 18 cluster, whatever else the image carries, and
+          # connect to it on whichever port it was given.
+          pg_lsclusters -h | awk '$1 != "18" {print $1, $2}' | while read -r version name; do
+            sudo pg_ctlcluster "$version" "$name" stop || true
+          done
+          sudo pg_ctlcluster 18 main start
+          PORT="$(pg_lsclusters -h | awk '$1 == "18" && $2 == "main" {print $3}')"
+          for _ in $(seq 1 30); do pg_isready -h 127.0.0.1 -p "$PORT" && break; sleep 1; done
+
+          # Verified, not assumed: fail if this is not actually 18.
+          VERSION="$(sudo -u postgres psql -p "$PORT" -tAc 'show server_version')"
+          echo "PostgreSQL server for this job: ${VERSION} on port ${PORT}"
+          case "$VERSION" in 18.*) ;; *) echo "Expected PostgreSQL 18, got ${VERSION}"; exit 1 ;; esac
+          echo "DB_PORT=${PORT}" >> "$GITHUB_ENV"
+
+          sudo -u postgres psql -p "$PORT" -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE ROLE purrenade LOGIN PASSWORD 'ci-only-not-a-secret';
+          CREATE DATABASE purrenade OWNER purrenade;
+          SQL
+
+      - name: Install from the lockfile
+        run: composer install --prefer-dist --no-interaction --no-progress
+
+      - name: Prepare the environment
+        run: |
+          cp .env.example .env
+          php artisan key:generate
+        env:
+          DB_PASSWORD: ci-only-not-a-secret
+
+      - name: Migrations
+        run: php artisan migrate --force
+        env:
+          DB_PASSWORD: ci-only-not-a-secret
+
+      - name: Tests, including the concurrency suite
+        run: vendor/bin/pest
+        env:
+          DB_PASSWORD: ci-only-not-a-secret
+
+      - name: Every migration rolls back and re-applies
+        run: |
+          set -euo pipefail
+          DB_SEARCH_PATH=purrenade_test php artisan migrate:fresh --force
+          DB_SEARCH_PATH=purrenade_test php artisan migrate:rollback --step=4 --force
+          DB_SEARCH_PATH=purrenade_test php artisan migrate --force
+          DB_SEARCH_PATH=purrenade_test php artisan migrate:refresh --force
+        env:
+          DB_PASSWORD: ci-only-not-a-secret
 
   contract:
     name: OpenAPI contract

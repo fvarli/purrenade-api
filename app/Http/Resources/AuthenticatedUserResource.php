@@ -57,8 +57,11 @@ final class AuthenticatedUserResource extends JsonResource
              * second endpoint. A separate `GET /progression` round trip would
              * buy a boundary the write path already enforces, and pay for it
              * with a loading flash on every visit.
+             *
+             * Read from either storage column during the M9 relocation — see
+             * `User::hasCompletedTutorial()`.
              */
-            'tutorial_completed' => $user->tutorial_completed_at !== null,
+            'tutorial_completed' => $user->hasCompletedTutorial(),
 
             'two_factor_enabled' => $user->hasTwoFactorEnabled(),
             'two_factor_pending' => $user->hasTwoFactorPending(),

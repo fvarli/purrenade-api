@@ -13,7 +13,9 @@ use App\Http\Controllers\Auth\SessionStateController;
 use App\Http\Controllers\Auth\TwoFactorChallengeController;
 use App\Http\Controllers\Auth\TwoFactorController;
 use App\Http\Controllers\HealthController;
+use App\Http\Controllers\Progression\ProgressionController;
 use App\Http\Controllers\Progression\TutorialController;
+use App\Http\Controllers\Runs\GameRunController;
 use App\Support\RateLimits;
 use Illuminate\Support\Facades\Route;
 
@@ -196,6 +198,30 @@ Route::prefix('v1')->group(function (): void {
         Route::post('/progression/tutorial', [TutorialController::class, 'complete'])
             ->middleware('throttle:'.RateLimits::NORMAL)
             ->name('progression.tutorial');
+
+        // The caller's own durable progression. Read-only.
+        Route::get('/progression', [ProgressionController::class, 'show'])
+            ->middleware('throttle:'.RateLimits::NORMAL)
+            ->name('progression.show');
+
+        /*
+         * The authoritative run lifecycle (ADR-0006, M9).
+         *
+         * Verified tier, like every product surface. Both routes share the
+         * `game-runs` limiter, which keeps a separate per-user bucket for each.
+         *
+         * `{runId}` must be a UUID; anything else is a 404 before the controller
+         * runs, indistinguishable from a run that does not exist or belongs to
+         * someone else.
+         */
+        Route::post('/game-runs', [GameRunController::class, 'start'])
+            ->middleware('throttle:'.RateLimits::GAME_RUNS)
+            ->name('game-runs.start');
+
+        Route::post('/game-runs/{runId}/finish', [GameRunController::class, 'finish'])
+            ->middleware('throttle:'.RateLimits::GAME_RUNS)
+            ->whereUuid('runId')
+            ->name('game-runs.finish');
 
         /*
         |------------------------------------------------------------------

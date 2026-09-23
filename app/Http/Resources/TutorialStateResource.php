@@ -12,10 +12,11 @@ use Illuminate\Http\Resources\Json\JsonResource;
  * The tutorial, as much as a client is allowed to know: whether it is done.
  *
  * The stored fact is `tutorial_completed_at`, a nullable timestamp, and it
- * stays stored — `docs/architecture/data-model.md` §4 owns it and M9 will move
- * it to `player_progression` unchanged. What crosses the wire is the boolean
- * derived from it, because **when** a player finished is not something any
- * client has a use for.
+ * stays stored — on `player_progression` since M9, with the legacy
+ * `users.tutorial_completed_at` still dual-written until the contract
+ * deployment (`docs/architecture/data-model.md` §4.1). What crosses the wire is
+ * the boolean derived from either, because **when** a player finished is not
+ * something any client has a use for.
  *
  * That is a narrower reading of this API's "facts rather than conclusions"
  * habit than `AuthenticatedUserResource` applies elsewhere, and deliberately
@@ -39,7 +40,7 @@ final class TutorialStateResource extends JsonResource
         $user = $this->resource;
 
         return [
-            'tutorial_completed' => $user->tutorial_completed_at !== null,
+            'tutorial_completed' => $user->hasCompletedTutorial(),
         ];
     }
 }

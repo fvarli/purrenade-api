@@ -1,11 +1,19 @@
 # Endpoints — Progression
 
-**Contract shape only.**
-
 | Method | Path | Auth | Idempotent | Rate-limit class | Status |
 | --- | --- | --- | --- | --- | --- |
-| GET | `/progression` | authenticated | — | normal | Contract only — built at M9 |
-| POST | `/progression/tutorial` | authenticated **+ verified** | yes | normal | **Implemented at M8** |
+| GET | `/progression` | authenticated **+ verified** | — | normal | **Implemented at M9** |
+| POST | `/progression/tutorial` | authenticated **+ verified** | yes | normal | **Implemented at M8**, storage relocated at M9 |
+
+**`GET /progression` response (M9):**
+
+```json
+{"data": {"lifetime_paws": 50, "loli_cycle_paws": 50, "loli_threshold": 200,
+          "best_score": 1000, "run_count": 1, "tutorial_completed": true}}
+```
+
+Read-only: a player without a progression row reads as zeros and nothing is written. No
+`lifetime_*` telemetry counter and no queued-bonus field appear, by design (ANTI-6).
 
 **The verified requirement is a deliberate narrowing, recorded here so the route
 and this table cannot drift.** The API's unverified tier is exactly four
@@ -70,11 +78,14 @@ failure count, no duration, no per-lesson data.
 
 ### How idempotence is enforced
 
-A conditional update whose affected-row count is the authority:
+Conditional updates — each a no-op once the column is set:
 
 ```sql
-UPDATE users SET tutorial_completed_at = now() WHERE id = ? AND tutorial_completed_at IS NULL
+UPDATE player_progression SET tutorial_completed_at = :now WHERE user_id = ? AND tutorial_completed_at IS NULL;
+UPDATE users SET tutorial_completed_at = :now WHERE id = ? AND tutorial_completed_at IS NULL;
 ```
+
+Both in one transaction (M9 dual-write, below), with the same instant.
 
 Zero rows means it was already completed, which is the ordinary replay case and
 returns `200` with the stored state. Reading the column and then writing it
@@ -82,9 +93,16 @@ would be the defect the display-name cooldown was fixed for: two concurrent
 requests both see null, both stamp, and the second silently overwrites the
 first.
 
-### Where the column lives — and where it is going
+### Where the column lives — relocated at M9
 
-The stored fact is **`users.tutorial_completed_at`**, a nullable timestamp.
+**Since M9** the fact lives on `player_progression.tutorial_completed_at`, backfilled exactly
+from `users.tutorial_completed_at` by the migration that created the table (which refuses to
+commit on any mismatch). During the transition the write goes to **both** columns and every
+read accepts **either**; `users.tutorial_completed_at` is dropped only in a later, separate
+contract deployment. See [`../../architecture/data-model.md`](../../architecture/data-model.md)
+§4.1 for the step table. The history below is kept for the record.
+
+Until M9 the stored fact was **`users.tutorial_completed_at`**, a nullable timestamp.
 
 **Progression still owns it.** `domain-boundaries.md` §4 is unchanged. What M8
 chose is only the *physical* location, and it chose `users` because

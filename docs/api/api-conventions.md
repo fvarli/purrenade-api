@@ -171,8 +171,10 @@ Operations that must not double-apply accept an idempotency key.
 | Scope | Unique **per user per endpoint** |
 | Behavior | A repeat with the same key returns the **original response** and performs no further work |
 | Conflict | The same key with a **different** request body is an error, not a silent overwrite |
-| Required on | **`POST /game-runs/{run}/finish`**, and anywhere else double-application would corrupt state |
-| Retention | Keys expire; the window is documented |
+| Required on | **`POST /game-runs/{runId}/finish`**, and anywhere else double-application would corrupt state |
+| Format | A UUID; case-insensitive, stored lower-case |
+| Retention | **For run submission, keys never expire** (GR-3): the identity lives on the run record for as long as the run does, so a late retry can never apply progression twice. A future generalisation to other endpoints (API-5) would decide its own retention. |
+| Replay equality | **Semantic**: the same status and the same decoded `data`. Not byte-identical — the stored result is `jsonb`, which does not keep key order. |
 
 Enforced by a **unique database constraint**, not by an application check.
 

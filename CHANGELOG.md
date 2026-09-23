@@ -6,6 +6,60 @@ This project does not yet have released versions.
 
 ## [Unreleased]
 
+### Added — M9: the server owns the run
+
+ADR-0006 Layers 1 and 2, implemented. The client proposes; the server decides; only an
+accepted run changes anything.
+
+- **`POST /api/v1/game-runs`** — the run is created server-side **before** gameplay, with a
+  server-recorded `started_at` (millisecond precision) and a server-issued uint32 `seed` from
+  the CSPRNG. No run token: the run is its opaque UUID plus the authenticated actor.
+  - **One active run per player**, as a partial unique index; the insert is
+    `ON CONFLICT (user_id) WHERE status = 'active' DO NOTHING`, so two simultaneous starts
+    produce one run and the other resumes it.
+  - **Start/resume semantics (C-11):** shape first (`character_id` must be a JSON string
+    matching `^[a-z0-9_]{1,32}$`, else `422`, even with an active run); a non-stale active run
+    is resumed unchanged with its **original** character whatever was requested; catalogue
+    availability is checked only when a run must be created (`422 character_unavailable`,
+    nothing written).
+  - **`RUN_STALE_REPLACEMENT_AFTER = 24 h`** — not an expiry. A start after 24 h replaces the
+    old run (`rejected` / `run_stale_replaced`) and creates the new one in one transaction, and
+    only if the new one can actually be created.
+- **`POST /api/v1/game-runs/{runId}/finish`** — classified `accepted`, `flagged` or `rejected`.
+  - Telemetry members must be JSON **integers** (`422` otherwise, including `12.0`); integers
+    outside `0..2147483647` are `rejected`. Structural rules reject; PROPOSED-tuning rules only
+    flag. Late arrival is never a reason to flag.
+  - **Idempotent, durably:** `Idempotency-Key` (UUID) is stored on the run with a request
+    fingerprint and no expiry — same key and request replays the stored result with zero
+    writes; a different request is `409 idempotency_key_reused`; a final run under another key
+    is `409 run_not_active`. No `idempotency_keys` table.
+  - **Only accepted** updates progression (atomic SQL, lock order RUN → PROGRESSION →
+    PAW_LEDGER) and appends a paw-ledger row. `bonuses_triggered` counts 200-paw threshold
+    crossings — never Loli activations.
+  - Unknown body members, including every ANTI-6 counter, are ignored: not persisted, not
+    fingerprinted, not returned.
+- **`GET /api/v1/progression`** — lifetime paws, Loli cycle, best score, accepted run count and
+  tutorial completion. No telemetry counters (ANTI-6).
+- **Schema:** `characters` (catalogue rows shipped by the migration), `player_progression`,
+  `runs`, `paw_ledger`, each with CHECK constraints for its domain. No `run_events`, no run
+  token, no ANTI-6 columns, no speculative leaderboard indexes.
+- **Tutorial relocation — expand only.** `player_progression.tutorial_completed_at` is
+  backfilled exactly from `users` by a migration that refuses to commit on any mismatch;
+  completion is dual-written and read from either column. `users.tutorial_completed_at` is
+  **not** dropped — that is a later, separate contract deployment. The wire stays
+  `tutorial_completed: boolean`.
+- **Rate limiting:** a `game-runs` limiter with separate per-user start and finish buckets,
+  30/minute each. No per-IP bucket: behind the BFF every player shares one source address.
+- **Contract:** the OpenAPI document now matches the implementation — `data` envelopes
+  (including the tutorial response, which had drifted), the uint32 seed as an integer, UUID
+  formats, the new problem codes, and no ANTI-6 fields. Response-conformance tests pin every M9
+  response to it.
+- **Tests:** a real-connection concurrency suite (`tests/Concurrency`) runs start/start,
+  start/finish and finish/finish races in separate processes against committed PostgreSQL
+  state, pausing one request mid-transaction to force each interleaving — including the READ
+  COMMITTED re-select a start relies on after waiting on a stale run.
+- **CI:** a PostgreSQL 18 compatibility job, and a migration rollback round-trip in both jobs.
+
 ### Added — M8: the tutorial is finished once, not once per device
 
 One endpoint, one column, and deliberately nothing else. A player who has completed or

@@ -35,9 +35,10 @@ decision.** Record it in `purrenade/docs/product/design-reference-conflicts.md`.
 Every documented decision carries **APPROVED**, **PROPOSED**, or **OPEN**.
 Never silently promote PROPOSED or OPEN to APPROVED.
 
-**Two ADRs block implementation and must be decided, not assumed:**
-- ADR-0005 — authentication transport and 2FA strategy (blocks M2/M3)
-- ADR-0006 — run validation / anti-cheat boundary (blocks M9/M10)
+**Two ADRs gated implementation; both are now accepted and must not be re-litigated:**
+- ADR-0005 — authentication transport and 2FA strategy (implemented at M2/M3)
+- ADR-0006 — run validation / anti-cheat boundary (implemented at M9; ANTI-6 stays
+  OPEN and blocks M11)
 
 ## Non-negotiable engineering rules
 

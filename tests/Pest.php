@@ -7,7 +7,10 @@ use App\Models\User;
 use App\Services\Auth\TwoFactorService;
 use Illuminate\Contracts\Validation\UncompromisedVerifier;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Testing\TestResponse;
 use PragmaRX\Google2FA\Google2FA;
+use Symfony\Component\HttpFoundation\Response;
 use Tests\TestCase;
 
 /*
@@ -41,6 +44,14 @@ pest()->extend(TestCase::class)->in('Feature');
 */
 
 pest()->use(RefreshDatabase::class)->in('Feature');
+
+/*
+| The concurrency suite is the one exception, deliberately: it must commit, so
+| that a second connection can observe what the first did. It isolates itself
+| by truncating the test schema around each test instead — see
+| tests/Concurrency/RunConcurrencyTest.php.
+*/
+pest()->extend(TestCase::class)->group('concurrency')->in('Concurrency');
 
 /*
 |--------------------------------------------------------------------------
@@ -195,4 +206,70 @@ function issueRecoveryCodes(User $user): array
 function forgetAuthGuards(): void
 {
     app('auth')->forgetGuards();
+}
+
+/*
+|--------------------------------------------------------------------------
+| Run helpers (M9)
+|--------------------------------------------------------------------------
+*/
+
+/**
+ * Start a run through the real endpoint, as the player.
+ *
+ * @return TestResponse<Response>
+ */
+function startRun(User $user, mixed $characterId = 'aysenur'): TestResponse
+{
+    // Tests here switch between players; without this the guard would answer
+    // every request as whoever it resolved first.
+    forgetAuthGuards();
+
+    return Pest\Laravel\withHeaders(sessionFor($user))
+        ->postJson('/api/v1/game-runs', ['character_id' => $characterId]);
+}
+
+/**
+ * A telemetry body that every M9 rule accepts, given a window of at least
+ * `$duration` milliseconds. 30 s, 1000 points, 50 paws: 33 pts/s, 1.7 paws/s,
+ * above the 10-per-paw floor.
+ *
+ * @return array{telemetry: array{reported_duration_ms: int, reported_score: int, reported_run_paws: int}}
+ */
+function plausibleTelemetry(int $duration = 30000, int $score = 1000, int $paws = 50): array
+{
+    return ['telemetry' => [
+        'reported_duration_ms' => $duration,
+        'reported_score' => $score,
+        'reported_run_paws' => $paws,
+    ]];
+}
+
+/**
+ * Finish a run through the real endpoint, as the player.
+ *
+ * @param  array<string, mixed>  $body
+ * @return TestResponse<Response>
+ */
+function finishRun(User $user, string $runId, array $body, ?string $key = null): TestResponse
+{
+    $headers = sessionFor($user);
+
+    if ($key !== null) {
+        $headers['Idempotency-Key'] = $key;
+    }
+
+    forgetAuthGuards();
+
+    return Pest\Laravel\withHeaders($headers)
+        ->postJson("/api/v1/game-runs/{$runId}/finish", $body);
+}
+
+/**
+ * The raw progression row, or null — read straight from the table, so an
+ * assertion cannot be satisfied by the code under test's own projection.
+ */
+function progressionRow(User $user): ?object
+{
+    return DB::table('player_progression')->where('user_id', $user->id)->first();
 }
