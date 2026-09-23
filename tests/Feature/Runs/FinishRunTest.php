@@ -179,6 +179,33 @@ it('carries paw overflow across the threshold, counting crossings but never acti
     '199 + 599' => [199, 599, 198, 3],
 ]);
 
+it('applies an accepted paw delta beyond the smallint range the cycle column stores', function (int $cycle, int $paws, int $expectedCycle, int $crossings): void {
+    // `loli_cycle_paws` is a smallint, and PostgreSQL types an untyped
+    // parameter added to it as a smallint too. A delta — or cycle plus delta —
+    // past 32767 is still a well-formed, plausible, accepted run once the
+    // window is long enough (≤ 3 paws/s), so it must be applied, not a 500.
+    $user = User::factory()->create();
+    app(ProgressionService::class)->ensure($user->id);
+    DB::table('player_progression')->where('user_id', $user->id)->update(['loli_cycle_paws' => $cycle]);
+
+    [, $run] = runWithWindow(14_400_000, $user);
+
+    finishRun($user, $run->id, plausibleTelemetry(14_400_000, 10 * $paws, $paws), (string) Str::uuid())
+        ->assertOk()
+        ->assertJsonPath('data.status', 'accepted')
+        ->assertJsonPath('data.progression.loli_cycle_paws', $expectedCycle)
+        ->assertJsonPath('data.progression.lifetime_paws', $paws);
+
+    $ledger = DB::table('paw_ledger')->where('run_id', $run->id)->first();
+
+    expect((int) $ledger->delta)->toBe($paws)
+        ->and((int) $ledger->resulting_cycle)->toBe($expectedCycle)
+        ->and((int) $ledger->bonuses_triggered)->toBe($crossings);
+})->with([
+    'a delta above 32767' => [0, 40_000, 0, 200],
+    'a cycle plus delta above 32767' => [199, 32_700, 99, 164],
+]);
+
 // ---------------------------------------------------------------------------
 // Flagged and rejected change nothing but their own row (S6)
 // ---------------------------------------------------------------------------

@@ -268,6 +268,11 @@ final class RunLifecycleService
      * PROGRESSION then PAW_LEDGER, for an accepted run. One atomic `UPDATE`
      * for the counters — never read-modify-write — with the paw overflow
      * computed in SQL: the cycle wraps at the threshold and keeps the rest.
+     *
+     * The arithmetic is `bigint`, cast explicitly: PostgreSQL types an untyped
+     * parameter from the column beside it, so `loli_cycle_paws + ?` would be
+     * smallint arithmetic and a plausible delta above 32767 would fail. Only the
+     * remainder — always 0..199 — is stored back into the smallint column.
      */
     private function applyAccepted(int $userId, string $runId, RunTelemetry $telemetry, int $previousCycle, CarbonImmutable $receivedAt): PlayerProgression
     {
@@ -277,8 +282,8 @@ final class RunLifecycleService
         /** @var object{lifetime_paws: int, loli_cycle_paws: int, best_score: int, run_count: int} $after */
         $after = DB::selectOne(
             'UPDATE player_progression SET
-                lifetime_paws = lifetime_paws + ?,
-                loli_cycle_paws = (loli_cycle_paws + ?) % ?,
+                lifetime_paws = lifetime_paws + CAST(? AS bigint),
+                loli_cycle_paws = (CAST(loli_cycle_paws AS bigint) + CAST(? AS bigint)) % CAST(? AS bigint),
                 best_score = GREATEST(best_score, ?),
                 run_count = run_count + 1,
                 updated_at = ?

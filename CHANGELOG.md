@@ -60,6 +60,13 @@ accepted run changes anything.
   COMMITTED re-select a start relies on after waiting on a stale run.
 - **CI:** a PostgreSQL 18 compatibility job, and a migration rollback round-trip in both jobs.
 
+### Fixed — M9 audit
+
+- An accepted finish whose paw delta (or cycle plus delta) exceeded 32767 failed with a `500`
+  instead of being applied: PostgreSQL typed the paw arithmetic as `smallint`, the cycle
+  column's type. The progression update now computes in `bigint` and stores only the 0..199
+  remainder.
+
 ### Added — M8: the tutorial is finished once, not once per device
 
 One endpoint, one column, and deliberately nothing else. A player who has completed or
