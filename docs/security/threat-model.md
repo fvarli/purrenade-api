@@ -93,9 +93,14 @@ See [anti-cheat.md](anti-cheat.md) and
 
 | Threat | Mitigation |
 | --- | --- |
-| Inflated entries | Only `accepted` runs appear |
-| Abusive display names | Moderation path — **OPEN (LB-3)** |
-| Enumeration of the player base | Only what the board displays is returned; no email, no identifiers beyond what ranking needs |
+| Inflated entries | Only `accepted` runs appear: the projection is written only on the accepted branch of the finish transaction, the backfill filters on `status = 'accepted'`, and the release-B migration asserts it against `runs` (M10) |
+| A client-supplied rank or score | There is no write endpoint. Scores come only from accepted `runs.score`; every rank is computed by the server per request |
+| Tie gaming by holding a run open | Tie priority is `achieved_at` = the **server-recorded finish** (D2), so holding a run open only ever loses ties. Residual: tie rule 3 uses the claimed `duration_ms` — APPROVED, and bounded by the `duration_below_minimum` flag rule |
+| Abusive display names | APPROVED v1 baseline plus **admin force-rename** (M13). Automated screening is future hardening (LB-7) |
+| Enumeration of the player base | Entries carry only `rank`, `display_name`, `score` and `is_self` — no user id, run id, email or timestamp. Verified accounts only, 60 reads a minute. Cursors are encrypted and carry no user id |
+| Cursor forgery or tampering | Authenticated encryption under APP_KEY, plus version, window and schema checks → `422 cursor_invalid`. A rotated key is a harmless restart from page 1 |
+| Pathological paging | `limit` ≤ 100; cursor ≤ 512 characters of a strict charset; keyset only, no OFFSET; every query an index range scan |
+| Banned or opted-out players shown | **Not enforced in M10** — no ban or opt-out state exists yet. The reader keeps one visibility predicate, applied to the page and both rank counts, for M13 and LB-8 |
 
 ### Email
 

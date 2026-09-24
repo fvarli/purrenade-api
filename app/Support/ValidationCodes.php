@@ -59,6 +59,8 @@ final class ValidationCodes
         'DisplayNameAvailable' => 'taken',
         'StrictInteger' => 'type_invalid',
         'Uuid' => 'format_invalid',
+        'Between' => 'out_of_range',
+        'ValidLeaderboardCursor' => 'cursor_invalid',
     ];
 
     /**

@@ -192,8 +192,13 @@ rows as scores change underneath the reader.
 | Rule | Detail |
 | --- | --- |
 | `limit` | Client-supplied, with a documented maximum |
-| `next_cursor` | Opaque. Clients never construct or parse one. |
+| `next_cursor` | Opaque. Clients never construct or parse one. `null` on the last page, when `has_more` is `false` |
 | Ordering | Always a **total order**, so a cursor is unambiguous |
+
+**First implementation: `GET /leaderboards` (M10)** — keyset cursors, default 25 and maximum
+100 (APPROVED for leaderboards, LB-2), `422 cursor_invalid` for an unusable cursor, and a
+documented consistency contract for a live ranking. See
+[`endpoints/leaderboards.md`](endpoints/leaderboards.md). API-4 stays open for other lists.
 
 ---
 

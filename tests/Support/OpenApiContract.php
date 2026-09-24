@@ -17,8 +17,8 @@ use Symfony\Component\Yaml\Yaml;
  *
  * A deliberately small subset of JSON Schema, covering what the document
  * actually uses for these responses: `$ref`, `type` (including nullable type
- * lists), `required`, `properties`, `items`, `enum`, `minimum`, `maximum` and
- * `format: uuid`. One rule is **stricter** than JSON Schema: an object may not
+ * lists), `oneOf`, `required`, `properties`, `items`, `enum`, `minimum`,
+ * `maximum` and `format: uuid`. One rule is **stricter** than JSON Schema: an object may not
  * carry a member its schema does not declare. An undeclared member is exactly
  * the kind of drift this exists to catch — and it is how an ANTI-6 field would
  * leak into a response without anybody noticing.
@@ -83,6 +83,24 @@ final class OpenApiContract
     {
         if (isset($schema['$ref'])) {
             $schema = self::resolve((string) $schema['$ref']);
+        }
+
+        // Exactly one alternative must accept the value — how the document
+        // spells "this object, or null".
+        if (isset($schema['oneOf']) && is_array($schema['oneOf'])) {
+            $matching = 0;
+
+            foreach ($schema['oneOf'] as $alternative) {
+                $alternativeErrors = [];
+                self::check($value, $alternative, $path, $alternativeErrors);
+                $matching += $alternativeErrors === [] ? 1 : 0;
+            }
+
+            if ($matching !== 1) {
+                $errors[] = "{$path}: matches {$matching} of the oneOf alternatives, not exactly one";
+            }
+
+            return;
         }
 
         if (isset($schema['allOf']) && is_array($schema['allOf'])) {

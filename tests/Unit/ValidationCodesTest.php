@@ -34,6 +34,12 @@ it('maps custom rule classes by their short name', function (): void {
         ->and(ValidationCodes::forRule('App\Rules\DisplayNameAvailable'))->toBe('taken');
 });
 
+it('maps the leaderboard query rules to their documented codes (M10)', function (): void {
+    expect(ValidationCodes::forRule('App\Rules\ValidLeaderboardCursor'))->toBe('cursor_invalid')
+        ->and(ValidationCodes::forRule('Between'))->toBe('out_of_range')
+        ->and(ValidationCodes::forRule('In'))->toBe('value_not_allowed');
+});
+
 it('falls back to a snake-cased rule name rather than a generic code', function (): void {
     // An unmapped rule still produces a usable, stable code, so adding a rule
     // never silently degrades the contract to "invalid".

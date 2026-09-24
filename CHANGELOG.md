@@ -6,6 +6,54 @@ This project does not yet have released versions.
 
 ## [Unreleased]
 
+### Added — M10: weekly and all-time leaderboards
+
+Only accepted runs rank, the server computes every rank, and the player's own entry is always
+fresh.
+
+- **Projection (release A).** `leaderboard_all_time` (one row per player) and
+  `leaderboard_weekly` (one per player per Europe/Istanbul week), maintained PostgreSQL tables
+  written **inline by the accepted finish**, after progression and the paw ledger — lock order
+  RUN → PROGRESSION → PAW_LEDGER → LB_ALL_TIME → LB_WEEKLY. Flagged, rejected and replayed
+  finishes never reach it, and a projection failure rolls the whole finish back. No cache, no
+  queue, no scheduler, no Redis.
+  - **One ORDER everywhere (E1):** `score DESC, achieved_at ASC, duration_ms ASC, run_id ASC`,
+    with `achieved_at` = the run's server-recorded finish (D2). The same comparator picks each
+    player's representative run and orders the board; `run_id` is unique per table, so the
+    order is total.
+  - **Monotone upsert:** a row is replaced only by a run that precedes it in ORDER, so writes
+    are idempotent and a row only ever moves up (invariant M).
+  - **Weeks** are computed with the IANA `Europe/Istanbul` zone in PHP and PostgreSQL alike —
+    never a fixed `+03:00` — and attributed by the run's server-recorded start.
+  - No public identity is stored: `display_name` is joined live. Foreign keys are
+    `ON DELETE RESTRICT` (E2); LB-5 stays open for SEC-3.
+  - The migration backfills every existing accepted run through the same upsert.
+- **Reconciliation (release B).** A second migration re-merges accepted runs — closing the
+  deploy window in which the previous release accepted runs without projecting them — and then
+  **fails closed** unless the projection matches `runs`: player sets, best scores (also against
+  `player_progression.best_score`), ORDER-first representatives per player and per week, and no
+  row naming a run that is not accepted.
+- **`GET /api/v1/leaderboards?window=weekly|all_time[&cursor][&limit]`** — verified accounts,
+  normal rate limit. Entries are exactly `{rank, display_name, score, is_self}`; the response
+  carries the week's UTC `period`, the caller's `own_entry` with its true rank (or `null`), and
+  `meta.{next_cursor, has_more}`. Keyset pagination with an encrypted, window- and week-bound
+  cursor (`422 cursor_invalid` when unusable); default 25, maximum 100. Each response is read
+  from one `REPEATABLE READ READ ONLY` snapshot; across pages the board is live, with the
+  consistency contract documented in `docs/api/endpoints/leaderboards.md`.
+- **Contract:** the leaderboard operation is marked implemented; `player_id` and `achieved_at`
+  are gone from entries, `username` is `display_name`, `is_self` is added, `next_cursor` is
+  `string | null`. New validation codes `out_of_range` and `cursor_invalid`.
+- **Tests:** representative selection at every tie level; order unity between the live
+  projector, the backfill and an independent PHP comparator on random boards; the Istanbul
+  calendar from 2015 (DST) to 2028 with PHP ↔ PostgreSQL parity; static pagination at 1, 7, 25
+  and 100; every clause of the live consistency contract; cursor tampering; fail-closed
+  reconciliation; and concurrency — parallel finishes, a same-key retry, reads during an
+  uncommitted finish, and a response that stays one snapshot while other writes commit.
+- **Performance:** `tests/Performance/leaderboard_explain.php` seeds one million players in an
+  isolated schema and records the real reader's plans; results in `data-model.md` §5.
+- **Not in M10:** ban filtering (M13), opt-out (LB-8), previous-week viewing (LB-9),
+  deletion/anonymisation (LB-5, SEC-3).
+
 ### Added — M9: the server owns the run
 
 ADR-0006 Layers 1 and 2, implemented. The client proposes; the server decides; only an

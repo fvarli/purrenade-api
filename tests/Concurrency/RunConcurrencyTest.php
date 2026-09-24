@@ -2,8 +2,12 @@
 
 declare(strict_types=1);
 
+use App\Enums\LeaderboardWindow;
 use App\Models\Character;
 use App\Models\User;
+use App\Services\Leaderboards\LeaderboardCursor;
+use App\Services\Leaderboards\LeaderboardReader;
+use Illuminate\Database\Events\QueryExecuted;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Config;
 use Illuminate\Support\Facades\DB;
@@ -529,4 +533,90 @@ it('lets a same-player start proceed only after the parked finish has projected'
     expect($r1['body']['data']['status'])->toBe('accepted')
         ->and($rs['status'])->toBe(201)
         ->and((int) DB::table('leaderboard_all_time')->value('score'))->toBe(900);
+});
+
+// ---------------------------------------------------------------------------
+// Leaderboard projection (M10) — the read path
+// ---------------------------------------------------------------------------
+
+it('answers a leaderboard read without waiting on an uncommitted finish, and without seeing it', function (): void {
+    [$writer, $reader] = User::factory()->count(2)->create()->all();
+    $run = seedActiveRun($writer, 60);
+
+    // The writer holds its uncommitted all-time and weekly rows.
+    runWorkers()->pauseOn('leaderboard_weekly', 'INSERT', 'f');
+    runWorkers()->holdPause();
+    $f = spawnFinish(runWorkers(), 'f', $writer, $run, (string) Str::uuid(), 1000);
+    runWorkers()->waitUntilBlocked('f');
+
+    $during = runWorkers()->result(runWorkers()->spawn('r1', 'GET', '/api/v1/leaderboards?window=all_time', sessionFor($reader), null));
+
+    expect(runWorkers()->stillRunning($f))->toBeTrue();
+
+    runWorkers()->releasePause();
+    $rf = runWorkers()->result($f);
+
+    $after = runWorkers()->result(runWorkers()->spawn('r2', 'GET', '/api/v1/leaderboards?window=all_time', sessionFor($reader), null));
+
+    expectNoDeadlock([$during, $rf, $after]);
+
+    expect($during['status'])->toBe(200)
+        ->and($during['body']['data'])->toBe([])
+        ->and($after['body']['data'])->toBe([['rank' => 1, 'display_name' => $writer->display_name, 'score' => 1000, 'is_self' => false]]);
+});
+
+it('reads a whole response from one REPEATABLE READ snapshot while other writes commit', function (): void {
+    $users = User::factory()->count(4)->create()->all();
+    [$viewer, $late] = [$users[0], $users[3]];
+
+    foreach ([$users[0], $users[1], $users[2]] as $index => $user) {
+        projectStoredRun(insertFinishedRun($user, 1000 * ($index + 1), 30000, '2026-09-22 10:00:00.000', '2026-09-22 10:05:00.000'));
+    }
+
+    $cursor = app(LeaderboardReader::class)
+        ->page($viewer, LeaderboardWindow::AllTime, null, 1)->nextCursor;
+    $after = app(LeaderboardCursor::class)->decode((string) $cursor, LeaderboardWindow::AllTime);
+
+    // Commit, from another connection, a row that precedes everything — the
+    // moment the page query has run and before the rank and own-entry queries.
+    $statements = [];
+    $injected = false;
+    DB::listen(function (QueryExecuted $query) use (&$statements, &$injected, $late, $viewer): void {
+        $statements[] = $query->sql;
+
+        if (! $injected && str_contains($query->sql, 'ORDER BY l.score DESC')) {
+            $injected = true;
+            $holder = DB::connection('pgsql_holder');
+            $runId = (string) Str::uuid7();
+            $holder->table('runs')->insert([
+                'id' => $runId, 'user_id' => $late->id,
+                'character_id' => Character::query()->where('key', 'aysenur')->value('id'),
+                'status' => 'accepted', 'seed' => 1,
+                'started_at' => '2026-09-22 10:00:00.000', 'finished_at' => '2026-09-22 10:01:00.000',
+                'duration_ms' => 30000, 'score' => 99999, 'run_paws' => 0, 'validation_meta' => '{}', 'result' => '{}',
+                'idempotency_key' => (string) Str::uuid(), 'idempotency_fingerprint' => str_repeat('a', 64),
+                'created_at' => '2026-09-22 10:00:00.000', 'updated_at' => '2026-09-22 10:01:00.000',
+            ]);
+            $holder->table('leaderboard_all_time')->insert([
+                'user_id' => $late->id, 'run_id' => $runId, 'score' => 99999,
+                'achieved_at' => '2026-09-22 10:01:00.000', 'duration_ms' => 30000,
+            ]);
+            // And the viewer improves, committed, after the snapshot was taken.
+            $holder->table('leaderboard_all_time')->where('user_id', $viewer->id)->update(['score' => 50000]);
+        }
+    });
+
+    $page = app(LeaderboardReader::class)->page($viewer, LeaderboardWindow::AllTime, $after, 5);
+
+    // Same snapshot: the first row's rank ignores the late row committed
+    // after the page query, and the own entry is the viewer as the page saw it.
+    expect($injected)->toBeTrue()
+        ->and($statements[0])->toBe('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY')
+        ->and(array_map(fn ($e) => [$e->rank, $e->score], $page->entries))->toBe([[2, 2000], [3, 1000]])
+        ->and([$page->ownEntry?->rank, $page->ownEntry?->score])->toBe([3, 1000]);
+
+    // The next response sees both commits.
+    $fresh = app(LeaderboardReader::class)->page($viewer, LeaderboardWindow::AllTime, null, 5);
+
+    expect(array_map(fn ($e) => [$e->rank, $e->score], $fresh->entries))->toBe([[1, 99999], [2, 50000], [3, 3000], [4, 2000]]);
 });

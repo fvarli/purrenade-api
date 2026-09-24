@@ -132,7 +132,7 @@ jobs:
           # `down()` is only real if it runs. The M10 and M9 migrations first —
           # the newest — then a full refresh, which runs every `down()` in
           # reverse and every `up()` again.
-          DB_SEARCH_PATH=purrenade_test php artisan migrate:rollback --step=5 --force
+          DB_SEARCH_PATH=purrenade_test php artisan migrate:rollback --step=6 --force
           DB_SEARCH_PATH=purrenade_test php artisan migrate --force
           DB_SEARCH_PATH=purrenade_test php artisan migrate:refresh --force
         env:
@@ -342,7 +342,7 @@ jobs:
         run: |
           set -euo pipefail
           DB_SEARCH_PATH=purrenade_test php artisan migrate:fresh --force
-          DB_SEARCH_PATH=purrenade_test php artisan migrate:rollback --step=5 --force
+          DB_SEARCH_PATH=purrenade_test php artisan migrate:rollback --step=6 --force
           DB_SEARCH_PATH=purrenade_test php artisan migrate --force
           DB_SEARCH_PATH=purrenade_test php artisan migrate:refresh --force
         env:

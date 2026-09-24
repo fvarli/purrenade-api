@@ -84,9 +84,12 @@ mandatory admin 2FA is the kind of control that breaks when someone adds a route
 
 ---
 
-## 6. Performance gates — PROPOSED
+## 6. Performance gates — PROPOSED, applied from M10
 
-From M10, when the leaderboard exists:
+From M10, when the leaderboard exists. The leaderboard's evidence is produced by
+`tests/Performance/leaderboard_explain.php` (one million players, run by hand, not in CI) and
+recorded in `docs/architecture/data-model.md` §5; P3 is asserted by
+`LeaderboardEndpointTest` (query count independent of page size).
 
 | # | Gate | Threshold |
 | --- | --- | --- |

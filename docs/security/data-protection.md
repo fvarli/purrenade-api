@@ -105,7 +105,17 @@ records and their compact derived facts — together with the rest of §4.
 | Is anything retained? | Audit and abuse records may need to be, for a bounded period, with a stated legal basis |
 | Immediate, or a grace period? | A grace period protects against mistakes and complicates "deleted means deleted" |
 
-None of this is decided. It must be, before the leaderboard ships.
+None of this is decided. **It no longer gates the leaderboard** (owner decision D1,
+2026-09-24): the M10 projection stores **no copy of public identity** — `display_name` is
+joined live from `users` — and is derived data, rebuildable from `runs`. **LB-5 now gates SEC-3
+/ account deletion (M14)**, which must settle deletion, anonymization and retention
+consistently across `runs`, `paw_ledger` **and** the leaderboard projections. The projection's
+foreign keys are `ON DELETE RESTRICT` (E2) precisely so that deletion cannot remove or keep
+leaderboard rows by accident; that engineering choice does **not** decide LB-5.
+
+**What the leaderboard exposes (M10):** `rank`, `display_name`, `score` and `is_self` per
+entry, to verified accounts only. No email, no user or run id, no timestamps. The leaderboard
+request log records the window and the duration only.
 
 ---
 
@@ -170,7 +180,7 @@ Related: the **consent records** for real-person and real-animal likenesses
 | --- | --- |
 | SEC-3 | Deletion, export, consent capture, retention — **the whole section** |
 | SEC-5 | Retention period for the run records and compact derived facts that are kept (§2A). ANTI-5 is resolved — no raw per-event history is retained — so this is now a period question, not a form question. |
-| LB-4 / LB-5 | Leaderboard opt-out; deleted and banned players' entries |
+| LB-8 / LB-5 | Leaderboard opt-out surface; deleted players' entries (gates SEC-3 / M14). Banned-player hiding is APPROVED and enforced from M13 |
 | AUTH-4 | How session location is derived, and whether it is proportionate |
 | OB-2 | Is an external error tracker acceptable? |
 | OPS-1 | Hosting and data processing location |

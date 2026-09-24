@@ -13,6 +13,7 @@ use App\Http\Controllers\Auth\SessionStateController;
 use App\Http\Controllers\Auth\TwoFactorChallengeController;
 use App\Http\Controllers\Auth\TwoFactorController;
 use App\Http\Controllers\HealthController;
+use App\Http\Controllers\Leaderboards\LeaderboardController;
 use App\Http\Controllers\Progression\ProgressionController;
 use App\Http\Controllers\Progression\TutorialController;
 use App\Http\Controllers\Runs\GameRunController;
@@ -222,6 +223,15 @@ Route::prefix('v1')->group(function (): void {
             ->middleware('throttle:'.RateLimits::GAME_RUNS)
             ->whereUuid('runId')
             ->name('game-runs.finish');
+
+        /*
+         * The weekly and all-time rankings (M10). Read-only; the projection is
+         * written only by an accepted finish. Verified tier like every product
+         * surface, on the normal read limiter.
+         */
+        Route::get('/leaderboards', LeaderboardController::class)
+            ->middleware('throttle:'.RateLimits::NORMAL)
+            ->name('leaderboards.show');
 
         /*
         |------------------------------------------------------------------

@@ -351,7 +351,7 @@ Every submission resolves to exactly one of three:
 | Paw ledger mutation | yes | **no** | no |
 | Personal best | yes | **no** | no |
 | Accepted `run_count` | yes | **no** | no |
-| Future leaderboard eligibility | yes | **no** | no |
+| Leaderboard eligibility (M10) | yes | **no** | no |
 | Achievement / unlock progression | yes | **no** | no |
 | The player is told | yes | yes — honestly, that the result was not accepted for competitive or progression purposes | yes — an explicit response |
 
@@ -437,6 +437,7 @@ A rate-limit refusal must not consume the idempotency slot.
 | **ANTI-5 / DM-1 / GR-5** — retention | Data minimization: validate at acceptance, persist compact derived facts, **no `run_events` table** | **Resolved** |
 | **Near-miss detection** | Deterministic, one event per obstacle, no score — a `DERIVED_TELEMETRY` input, and therefore **not established in v1** (§8) | **ANTI-6** |
 | **LB-1** — week boundary | A server-recorded start time makes attribution unambiguous | Resolved |
+| **M10 leaderboards** | Only an `accepted` finish reaches the projection, inside its own transaction; a replay writes nothing; `achieved_at` is the server's finish time (D2), so a held-open run cannot win ties. No ANTI-6 fact is used by any leaderboard rule | Implemented |
 | **ADR-0005** — auth | A run is always attributable to an authenticated, verified account, and the actor is resolved from the credential — never from the body | Resolved |
 | **Submission rate limiting** | A dedicated limiter exists for run start and finish; values are an M9 implementation parameter. See [`rate-limiting.md`](rate-limiting.md) §2 | Resolved |
 | **SEC-3 / SEC-5** — retention policy | Still open, but the surface is far smaller: no raw per-event gameplay history is retained | Open |

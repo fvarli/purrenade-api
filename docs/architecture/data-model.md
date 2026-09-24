@@ -429,8 +429,53 @@ run already in `runs`: per window, `DISTINCT ON` picks the ORDER-first accepted 
 go through the same monotone upsert. PostgreSQL computes the week key with its own IANA zone
 data — `date_trunc('week', (started_at AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Istanbul')::date`
 — and a test proves it equals the PHP key for boundary instants from 2015 (when Istanbul still
-observed DST) to 2028. Release B re-runs the merge and asserts the result (§5 reconciliation,
-added with it).
+observed DST) to 2028.
+
+Migration `reconcile_leaderboard_projection` (release B) re-runs the merge — picking up any run
+the previous release accepted without projecting it between release A's migration and the
+PHP-FPM reload (deploy window W2) — and then **asserts** the projection against `runs`
+(`App\Services\Leaderboards\LeaderboardReconciliation`), throwing on any disagreement so the
+deploy stops at MIGRATION:
+
+- the all-time player set equals the set of players with an accepted run;
+- each all-time score equals the best accepted score **and** `player_progression.best_score`;
+- each all-time row names the ORDER-first accepted run for its player;
+- the weekly `(week, player)` set and each representative equal the ORDER-first accepted run
+  per Istanbul start-week;
+- no row names a run that is not accepted, or carries values other than its run's.
+
+Its `down()` is a no-op: it changes no schema, and the merge is correct under either release.
+
+### Reads, and their plans at volume (gates P1–P4)
+
+`LeaderboardReader` issues at most four statements per response, whatever the page size (P3,
+asserted by `LeaderboardEndpointTest`): `SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ
+ONLY`; the page (`LIMIT n+1` keyset scan, `users` joined by primary key); the own row by primary
+key; and **one** count that yields both the page's first rank and the own rank, using `count(*)
+FILTER (…)` from the lower of the two scores — so the cost is the larger rank, not the sum.
+
+Measured with `tests/Performance/leaderboard_explain.php` on **PostgreSQL 16.15** (the production
+major version), 2026-09-24: **1,000,000** all-time rows, **200,000** in the current week, one
+accepted run per player, scores skewed with many ties, viewer and cursor both at the **median**
+(the worst realistic case for an O(rank) count), after `VACUUM ANALYZE`:
+
+| Statement | Plan | Time |
+| --- | --- | --- |
+| Page, first page (all-time / weekly) | Index Scan on `*_order` (weekly: `week_start` equality in the index condition), Nested Loop → `users_pkey`, 26 rows read | 0.1–0.3 ms |
+| Page after the median cursor, limit 100 | Index Scan on `*_order` with `score <= s` as the index condition; 101 rows read | 0.3–0.4 ms |
+| Own row | Index Scan on the primary key, Nested Loop → `users_pkey` | < 0.05 ms |
+| Both ranks, all-time (500,000 rows ahead) | Parallel Seq Scan — the planner's choice, and the cheaper one, for a predicate covering half the table; for a viewer near the top it is an Index Only Scan on `leaderboard_all_time_order` | 47–52 ms |
+| Both ranks, weekly (100,000 rows ahead) | Parallel Index Only Scan on `leaderboard_weekly_order`, 0 heap fetches | 12–13 ms |
+
+Whole-read latency over 60 calls (mixed first and cursor pages, limits 25 and 100): **all-time
+p50 49.8 ms, p95 76.8 ms, max 93.6 ms; weekly p50 14.5 ms, p95 17.6 ms** — inside the p95 < 100 ms
+budget. The first measurement, with the two ranks counted separately, was all-time p95 113 ms;
+merging them into one scan is what brought it under. **The write path (P2)** — both upserts of
+an accepted finish — costs p50 1.29 ms, p95 1.79 ms. The backfill merged 1,000,000 accepted runs
+in 58 s; production's history is orders of magnitude smaller.
+
+A rank is inherently O(rank). If the board ever outgrows this budget, the remedy is a
+maintained rank structure or bucketed counts — a new decision, not a tuning change.
 
 ### What M10 does not do
 
