@@ -12,6 +12,7 @@ use App\Models\Character;
 use App\Models\PlayerProgression;
 use App\Models\Run;
 use App\Models\User;
+use App\Services\Leaderboards\LeaderboardProjector;
 use App\Services\Progression\ProgressionService;
 use Carbon\CarbonImmutable;
 use Illuminate\Database\UniqueConstraintViolationException;
@@ -26,7 +27,7 @@ use RuntimeException;
  * its `started_at` before gameplay, and it classifies the finish and applies
  * progression — for an **accepted** run only — in one transaction.
  *
- * ## Lock order — RUN → PLAYER_PROGRESSION → PAW_LEDGER (C-1)
+ * ## Lock order — RUN → PLAYER_PROGRESSION → PAW_LEDGER → LB_ALL_TIME → LB_WEEKLY (C-1)
  *
  * Every transaction here that touches more than one of these takes them in
  * that order, and nothing else in the application locks two of them:
@@ -35,7 +36,12 @@ use RuntimeException;
  *   speculative insert under the partial unique index). It **never** locks
  *   progression — it only reads `loli_cycle_paws` with a plain `SELECT`.
  * - **Finish** locks the RUN, then PROGRESSION `FOR UPDATE`, then appends to
- *   the PAW_LEDGER, then updates the RUN row it already holds.
+ *   the PAW_LEDGER, then — for an accepted run only — upserts the player's
+ *   LB_ALL_TIME row and then their LB_WEEKLY row (M10), then updates the RUN
+ *   row it already holds. The leaderboard rows are keyed by the player, and a
+ *   player's finishes are already serialised by the progression lock, so two
+ *   finishes never contend for them in the other order; different players
+ *   write different rows. Leaderboard reads take no locks.
  * - The progression row's existence is ensured **before** either transaction
  *   opens, as its own autocommitted statement
  *   (`ProgressionService::ensure()`), so no run transaction ever waits on a
@@ -56,6 +62,7 @@ final class RunLifecycleService
         private readonly ProgressionService $progression,
         private readonly RunValidator $validator,
         private readonly RunSeedGenerator $seeds,
+        private readonly LeaderboardProjector $leaderboards,
     ) {}
 
     /**
@@ -221,9 +228,27 @@ final class RunLifecycleService
             'run_count' => (int) $before->run_count,
         ]);
 
-        // 6–7. Only an ACCEPTED run mutates progression or the ledger.
+        // The finalisation time, and the leaderboard's `achieved_at` (D2). A
+        // clock stepped backwards cannot produce a finish before the start;
+        // the measured window (possibly negative) is kept in the metadata as
+        // observed.
+        $finishedAt = $receivedAt->lessThan($run->started_at) ? CarbonImmutable::instance($run->started_at) : $receivedAt;
+
+        // 6–7. Only an ACCEPTED run mutates progression, the ledger or the
+        //      leaderboard projection.
         if ($status === RunStatus::Accepted) {
             $progression = $this->applyAccepted($user->id, $run->id, $telemetry, (int) $before->loli_cycle_paws, $receivedAt);
+
+            // LB_ALL_TIME → LB_WEEKLY. The week is the run's server-recorded
+            // start; a failure here rolls the whole finish back.
+            $this->leaderboards->recordAccepted(
+                $user->id,
+                $run->id,
+                CarbonImmutable::instance($run->started_at),
+                $finishedAt,
+                $telemetry->reportedScore,
+                $telemetry->reportedDurationMs,
+            );
         }
 
         $counted = $status === RunStatus::Accepted || $status === RunStatus::Flagged;
@@ -244,11 +269,7 @@ final class RunLifecycleService
             'characters_unlocked' => [],
         ];
 
-        // 8. RUN — the row this transaction already holds. A clock stepped
-        //    backwards cannot produce a finish before the start; the measured
-        //    window (possibly negative) is kept in the metadata as observed.
-        $finishedAt = $receivedAt->lessThan($run->started_at) ? CarbonImmutable::instance($run->started_at) : $receivedAt;
-
+        // 8. RUN — the row this transaction already holds.
         Run::query()->whereKey($run->id)->update([
             'status' => $status->value,
             'finished_at' => $this->timestamp($finishedAt),

@@ -34,15 +34,15 @@ for a reason or not at all.
   flow requires**, and the job payload never contains a plaintext code that is
   stored hashed.
 
-### 2.2 Leaderboard projection refresh — PROPOSED
+### 2.2 Leaderboard projection refresh — **inline, no job (M10)**
 
-Refreshing the ranking projection inside the submission transaction would make
-every run submission pay for the whole leaderboard.
-
-**OPEN (BA-3):** whether the refresh is deferred to a job or done inline for the
-affected rows only. Deferring introduces a window where the board is briefly
-stale — acceptable for other players, **not** acceptable for the submitting
-player, whose own rank is always computed fresh.
+Refreshing the whole ranking inside the submission transaction would make every
+run submission pay for the whole leaderboard — so nothing is "refreshed". An
+accepted finish upserts **only the affected rows**, the player's all-time row
+and their weekly row, inside its own transaction (BA-3 and QJ-2 resolved). That
+costs two single-row index writes, keeps the board exact at commit, and needs no
+job, no worker and no scheduler — production has neither a scheduler nor a use
+for one here. See `data-model.md` §5.
 
 ---
 
@@ -82,7 +82,7 @@ queueable.** Making it a job would trade correctness for latency.
 | Queue driver | Redis, if Redis is already justified for rate limiting and caching. Otherwise the database driver is sufficient at this volume and removes a dependency. |
 | Worker supervision | Required in every environment where jobs are dispatched |
 | Monitoring | Queue depth, failure rate and oldest-job age are the three signals that matter |
-| Scheduled tasks | Only if the leaderboard projection is refreshed on a schedule rather than on write |
+| Scheduled tasks | None. The leaderboard projection is maintained on write (§2.2) |
 
 See [caching-and-redis.md](caching-and-redis.md) for whether Redis is adopted at
 all.
@@ -94,6 +94,6 @@ all.
 | Ref | Question |
 | --- | --- |
 | QJ-1 | Is Redis adopted, and therefore used as the queue driver? (CACHE-1) |
-| QJ-2 | Is the leaderboard projection refreshed by job or inline? (BA-3) |
+| ~~QJ-2~~ | **Resolved at M10:** inline, affected rows only, inside the finish transaction (§2.2). |
 | QJ-3 | Which security notifications are sent, if any? Nothing in the approved surface requires them |
 | QJ-4 | Retention and alerting policy for failed jobs |

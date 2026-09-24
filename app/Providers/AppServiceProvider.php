@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Providers;
 
+use App\Services\Leaderboards\LeaderboardWeek;
 use App\Services\Runs\RunValidationBounds;
 use App\Services\Runs\RunValidator;
 use App\Support\EnvironmentGuard;
@@ -23,6 +24,10 @@ class AppServiceProvider extends ServiceProvider
         $this->app->singleton(RunValidator::class, fn (): RunValidator => new RunValidator(
             RunValidationBounds::fromConfig((array) config('game_runs')),
         ));
+
+        // The week calendar takes its zone as a value — read here, from
+        // `config/leaderboards.php`, and nowhere else at runtime.
+        $this->app->singleton(LeaderboardWeek::class, fn (): LeaderboardWeek => LeaderboardWeek::fromConfig());
     }
 
     /**

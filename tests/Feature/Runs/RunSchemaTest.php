@@ -5,7 +5,6 @@ declare(strict_types=1);
 use App\Models\Character;
 use App\Models\User;
 use App\Services\Progression\ProgressionService;
-use Illuminate\Database\QueryException;
 use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
@@ -51,27 +50,6 @@ function finishedShape(string $status): array
         'result' => '{}',
         'validation_meta' => '{}',
     ];
-}
-
-/**
- * Run a statement that must be refused, inside a savepoint so the refusal
- * does not poison the test's surrounding transaction.
- */
-function expectRefused(Closure $statement, string $exception = QueryException::class): void
-{
-    $refusal = null;
-
-    DB::beginTransaction();
-
-    try {
-        $statement();
-    } catch (Throwable $e) {
-        $refusal = $e;
-    }
-
-    DB::rollBack();
-
-    expect($refusal)->toBeInstanceOf($exception);
 }
 
 it('holds at most one active run per player (GR-4)', function (): void {
@@ -208,7 +186,10 @@ it('documents bonuses_triggered as threshold accounting, not activation', functi
 });
 
 it('rolls the M9 migrations back and forward cleanly', function (): void {
+    // Newest first, as a rollback runs: the M10 projection references `runs`,
+    // so it goes before the table it depends on and comes back after it.
     $migrations = collect([
+        '2026_09_24_100000_create_leaderboard_tables.php',
         '2026_09_23_100300_create_paw_ledger_table.php',
         '2026_09_23_100200_create_runs_table.php',
         '2026_09_23_100100_create_player_progression_table.php',
@@ -217,7 +198,7 @@ it('rolls the M9 migrations back and forward cleanly', function (): void {
 
     $migrations->each(fn (object $m) => $m->down());
 
-    foreach (['paw_ledger', 'runs', 'player_progression', 'characters'] as $table) {
+    foreach (['leaderboard_weekly', 'leaderboard_all_time', 'paw_ledger', 'runs', 'player_progression', 'characters'] as $table) {
         expect(Schema::hasTable($table))->toBeFalse();
     }
 
@@ -225,7 +206,7 @@ it('rolls the M9 migrations back and forward cleanly', function (): void {
 
     $migrations->reverse()->each(fn (object $m) => $m->up());
 
-    foreach (['paw_ledger', 'runs', 'player_progression', 'characters'] as $table) {
+    foreach (['leaderboard_weekly', 'leaderboard_all_time', 'paw_ledger', 'runs', 'player_progression', 'characters'] as $table) {
         expect(Schema::hasTable($table))->toBeTrue();
     }
 

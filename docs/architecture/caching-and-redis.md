@@ -105,5 +105,5 @@ infrastructure component is an operational commitment, not a free optimization.
 | --- | --- |
 | CACHE-1 | Is Redis adopted at all, and at which milestone? |
 | CACHE-2 | Redis or Valkey? |
-| CACHE-3 | Is the leaderboard projection in PostgreSQL or in Redis? |
-| CACHE-4 | Cache TTLs, once real traffic shapes are known |
+| ~~CACHE-3~~ | **Resolved at M10:** the leaderboard projection is maintained PostgreSQL tables (`data-model.md` §5). |
+| CACHE-4 | Cache TTLs, once real traffic shapes are known. **M10 caches nothing** — every leaderboard response, the player's own row included, is read fresh from the projection. |

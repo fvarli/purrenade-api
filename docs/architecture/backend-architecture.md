@@ -157,4 +157,4 @@ traces or internal details in responses. See
 | --- | --- |
 | BA-1 | Whether an event-driven internal design is warranted, or direct service calls suffice at this scale (PROPOSED: direct calls; events only where a genuine fan-out exists) |
 | BA-2 | Whether the admin surface is a separate route group in this application or a separate application |
-| BA-3 | The transaction boundary for leaderboard projection refresh — inside the submission transaction, or deferred |
+| ~~BA-3~~ | **Resolved at M10:** inside the finish transaction, for the affected rows only (`data-model.md` §5). |

@@ -2,12 +2,18 @@
 
 declare(strict_types=1);
 
+use App\Models\Character;
 use App\Models\PersonalAccessToken;
 use App\Models\User;
 use App\Services\Auth\TwoFactorService;
+use App\Services\Leaderboards\LeaderboardProjector;
+use App\Services\Leaderboards\LeaderboardWeek;
+use Carbon\CarbonImmutable;
 use Illuminate\Contracts\Validation\UncompromisedVerifier;
+use Illuminate\Database\QueryException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
 use Illuminate\Testing\TestResponse;
 use PragmaRX\Google2FA\Google2FA;
 use Symfony\Component\HttpFoundation\Response;
@@ -272,4 +278,199 @@ function finishRun(User $user, string $runId, array $body, ?string $key = null):
 function progressionRow(User $user): ?object
 {
     return DB::table('player_progression')->where('user_id', $user->id)->first();
+}
+
+/*
+|--------------------------------------------------------------------------
+| Schema helpers
+|--------------------------------------------------------------------------
+*/
+
+/**
+ * Run a statement that must be refused, inside a savepoint so the refusal
+ * does not poison the test's surrounding transaction.
+ */
+function expectRefused(Closure $statement, string $exception = QueryException::class): void
+{
+    $refusal = null;
+
+    DB::beginTransaction();
+
+    try {
+        $statement();
+    } catch (Throwable $e) {
+        $refusal = $e;
+    }
+
+    DB::rollBack();
+
+    expect($refusal)->toBeInstanceOf($exception);
+}
+
+/*
+|--------------------------------------------------------------------------
+| Leaderboard helpers (M10)
+|--------------------------------------------------------------------------
+*/
+
+/**
+ * A finished run written straight to `runs`, in the shape the lifecycle
+ * produces — for crafting exact ties and historical datasets the endpoint
+ * cannot produce on demand. Nothing is projected.
+ */
+function insertFinishedRun(
+    User $user,
+    int $score,
+    int $durationMs,
+    string $startedAt,
+    string $finishedAt,
+    string $status = 'accepted',
+    ?string $id = null,
+): string {
+    $id ??= (string) Str::uuid7();
+    $counted = $status !== 'rejected';
+
+    DB::table('runs')->insert([
+        'id' => $id,
+        'user_id' => $user->id,
+        'character_id' => Character::query()->where('key', 'aysenur')->value('id'),
+        'status' => $status,
+        'seed' => 1,
+        'started_at' => $startedAt,
+        'finished_at' => $finishedAt,
+        'duration_ms' => $counted ? $durationMs : null,
+        'score' => $counted ? $score : null,
+        'run_paws' => $counted ? 0 : null,
+        'validation_meta' => '{}',
+        'result' => $counted ? '{}' : null,
+        'idempotency_key' => $counted ? (string) Str::uuid() : null,
+        'idempotency_fingerprint' => $counted ? str_repeat('a', 64) : null,
+        'created_at' => $startedAt,
+        'updated_at' => $finishedAt,
+    ]);
+
+    return $id;
+}
+
+/** Project a stored run through the live projector, exactly as the finish does. */
+function projectStoredRun(string $runId): void
+{
+    $run = DB::table('runs')->where('id', $runId)->first();
+
+    app(LeaderboardProjector::class)->recordAccepted(
+        (int) $run->user_id,
+        (string) $run->id,
+        CarbonImmutable::parse((string) $run->started_at, 'UTC'),
+        CarbonImmutable::parse((string) $run->finished_at, 'UTC'),
+        (int) $run->score,
+        (int) $run->duration_ms,
+    );
+}
+
+/**
+ * The projection as plain rows, in a stable key order.
+ *
+ * @return list<array<string, mixed>>
+ */
+function allTimeRows(): array
+{
+    return DB::table('leaderboard_all_time')
+        ->orderBy('user_id')
+        ->get(['user_id', 'run_id', 'score', 'achieved_at', 'duration_ms'])
+        ->map(fn (object $row): array => normaliseLeaderboardRow((array) $row))
+        ->all();
+}
+
+/**
+ * PostgreSQL prints a `timestamp(3)` without its zero milliseconds; compare
+ * them in one fixed-width form.
+ *
+ * @param  array<string, mixed>  $row
+ * @return array<string, mixed>
+ */
+function normaliseLeaderboardRow(array $row): array
+{
+    $row['achieved_at'] = CarbonImmutable::parse((string) $row['achieved_at'], 'UTC')->format('Y-m-d H:i:s.v');
+
+    return $row;
+}
+
+/** @return list<array<string, mixed>> */
+function weeklyRows(): array
+{
+    return DB::table('leaderboard_weekly')
+        ->orderBy('week_start')->orderBy('user_id')
+        ->get(['week_start', 'user_id', 'run_id', 'score', 'achieved_at', 'duration_ms'])
+        ->map(fn (object $row): array => normaliseLeaderboardRow((array) $row))
+        ->all();
+}
+
+/**
+ * ORDER, in PHP: score DESC, achieved_at ASC, duration_ms ASC, run_id ASC.
+ * An independent statement of the comparator the SQL implements, for the
+ * order-unity properties. `achieved_at` strings are fixed-width UTC, and
+ * uuid order is the order of their lower-case hex text.
+ *
+ * @param  array{score: int, achieved_at: string, duration_ms: int, run_id: string}  $a
+ * @param  array{score: int, achieved_at: string, duration_ms: int, run_id: string}  $b
+ */
+function leaderboardOrder(array $a, array $b): int
+{
+    return [$b['score'], $a['achieved_at'], $a['duration_ms'], strtolower($a['run_id'])]
+        <=> [$a['score'], $b['achieved_at'], $b['duration_ms'], strtolower($b['run_id'])];
+}
+
+/**
+ * What the projection must contain, computed in PHP from `runs` alone:
+ * the ORDER-first accepted run per player, and per player and Istanbul week.
+ *
+ * @return array{all_time: list<array<string, mixed>>, weekly: list<array<string, mixed>>}
+ */
+function expectedProjection(): array
+{
+    $week = app(LeaderboardWeek::class);
+
+    $runs = DB::table('runs')->where('status', 'accepted')->get()->map(fn (object $r): array => [
+        'user_id' => (int) $r->user_id,
+        'run_id' => (string) $r->id,
+        'score' => (int) $r->score,
+        'achieved_at' => CarbonImmutable::parse((string) $r->finished_at, 'UTC')->format('Y-m-d H:i:s.v'),
+        'duration_ms' => (int) $r->duration_ms,
+        'week_start' => $week->weekStartFor(CarbonImmutable::parse((string) $r->started_at, 'UTC')),
+    ])->all();
+
+    $pick = function (array $groups, array $keys): array {
+        $rows = [];
+        foreach ($groups as $group) {
+            usort($group, 'leaderboardOrder');
+            $rows[] = array_map(fn (string $key): mixed => $group[0][$key], array_combine($keys, $keys));
+        }
+
+        return $rows;
+    };
+
+    $byUser = [];
+    $byWeek = [];
+    foreach ($runs as $run) {
+        $byUser[$run['user_id']][] = $run;
+        $byWeek[$run['week_start'].'|'.str_pad((string) $run['user_id'], 12, '0', STR_PAD_LEFT)][] = $run;
+    }
+
+    ksort($byUser);
+    ksort($byWeek);
+
+    return [
+        'all_time' => $pick($byUser, ['user_id', 'run_id', 'score', 'achieved_at', 'duration_ms']),
+        'weekly' => $pick($byWeek, ['week_start', 'user_id', 'run_id', 'score', 'achieved_at', 'duration_ms']),
+    ];
+}
+
+/**
+ * The projection in the shape of expectedProjection().
+ *
+ * @return array{all_time: list<array<string, mixed>>, weekly: list<array<string, mixed>>}
+ */
+function actualProjection(): array
+{
+    return ['all_time' => allTimeRows(), 'weekly' => weeklyRows()];
 }

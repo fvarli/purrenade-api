@@ -440,3 +440,93 @@ it('keeps one key to one run when the same key races onto a finalised run', func
         ->and($r1['body']['data']['status'])->toBe('accepted')
         ->and(DB::table('runs')->where('idempotency_key', $key)->pluck('id')->all())->toBe([$current]);
 });
+
+// ---------------------------------------------------------------------------
+// Leaderboard projection (M10) — the write path
+// ---------------------------------------------------------------------------
+
+it('projects two players\' concurrent accepted finishes without either waiting on the other', function (): void {
+    [$a, $b] = User::factory()->count(2)->create()->all();
+    $runA = seedActiveRun($a, 60);
+    $runB = seedActiveRun($b, 60);
+
+    // A holds its all-time row and has written its weekly row, uncommitted:
+    // the end of the lock order RUN → PROGRESSION → PAW_LEDGER → LB_ALL_TIME
+    // → LB_WEEKLY.
+    runWorkers()->pauseOn('leaderboard_weekly', 'INSERT', 'fa');
+    runWorkers()->holdPause();
+    $fa = spawnFinish(runWorkers(), 'fa', $a, $runA, (string) Str::uuid(), 1000);
+    runWorkers()->waitUntilBlocked('fa');
+
+    // B writes different rows in every table and completes while A is parked.
+    $rb = runWorkers()->result(spawnFinish(runWorkers(), 'fb', $b, $runB, (string) Str::uuid(), 1000));
+
+    expect(runWorkers()->stillRunning($fa))->toBeTrue();
+
+    runWorkers()->releasePause();
+    $ra = runWorkers()->result($fa);
+
+    expectNoDeadlock([$ra, $rb]);
+
+    expect($ra['body']['data']['status'])->toBe('accepted')
+        ->and($rb['body']['data']['status'])->toBe('accepted')
+        ->and(DB::table('leaderboard_all_time')->orderBy('user_id')->pluck('run_id')->all())->toBe([$runA, $runB])
+        ->and(DB::table('leaderboard_weekly')->count())->toBe(2)
+        // Equal scores. B committed first, but A's finish was received first
+        // — and tie priority is the recorded finish time (D2), not the commit
+        // order.
+        ->and(DB::table('leaderboard_all_time')->orderByDesc('score')->orderBy('achieved_at')->orderBy('duration_ms')->orderBy('run_id')->pluck('run_id')->all())->toBe([$runA, $runB]);
+});
+
+it('projects a concurrent same-key retry exactly once', function (): void {
+    $user = User::factory()->create();
+    $run = seedActiveRun($user, 60);
+    $key = (string) Str::uuid();
+
+    runWorkers()->pauseOn('leaderboard_weekly', 'INSERT', 'f1');
+    runWorkers()->holdPause();
+    $f1 = spawnFinish(runWorkers(), 'f1', $user, $run, $key);
+    runWorkers()->waitUntilBlocked('f1');
+
+    // The retry waits on the run row F1 holds, then replays.
+    $f2 = spawnFinish(runWorkers(), 'f2', $user, $run, $key);
+    runWorkers()->waitUntilBlocked('f2');
+
+    runWorkers()->releasePause();
+
+    $r1 = runWorkers()->result($f1);
+    $r2 = runWorkers()->result($f2);
+
+    expectNoDeadlock([$r1, $r2]);
+
+    expect($r2['body'])->toEqual($r1['body'])
+        ->and(DB::table('leaderboard_all_time')->pluck('run_id')->all())->toBe([$run])
+        ->and(DB::table('leaderboard_weekly')->pluck('run_id')->all())->toBe([$run]);
+});
+
+it('lets a same-player start proceed only after the parked finish has projected', function (): void {
+    $user = User::factory()->create();
+    $first = seedActiveRun($user, 120);
+
+    // F1 is parked at its weekly write, holding the progression lock.
+    runWorkers()->pauseOn('leaderboard_weekly', 'INSERT', 'f1');
+    runWorkers()->holdPause();
+    $f1 = spawnFinish(runWorkers(), 'f1', $user, $first, (string) Str::uuid(), 900);
+    runWorkers()->waitUntilBlocked('f1');
+
+    // A start by the same player waits on the run row F1 holds, and can only
+    // create the next run once F1 has committed its projection.
+    $s = spawnStart(runWorkers(), 's', $user, 'aysenur');
+    runWorkers()->waitUntilBlocked('s');
+
+    runWorkers()->releasePause();
+
+    $r1 = runWorkers()->result($f1);
+    $rs = runWorkers()->result($s);
+
+    expectNoDeadlock([$r1, $rs]);
+
+    expect($r1['body']['data']['status'])->toBe('accepted')
+        ->and($rs['status'])->toBe(201)
+        ->and((int) DB::table('leaderboard_all_time')->value('score'))->toBe(900);
+});

@@ -162,10 +162,13 @@ retroactively either. Adding nullable counter columns later is an ordinary expan
 Tracked as **ANTI-6**, which blocks **M11** only.
 
 **Indexes.** M9 ships only the two unique ones above. The query indexes follow their queries
-(gate D5), so they arrive with M10:
-- `(user_id, created_at desc)` — profile history — **PROPOSED, M10**
-- `(status, score desc)` partial on `status = 'accepted'` — all-time ranking — **PROPOSED, M10**
-- `(status, started_at, score desc)` partial on `status = 'accepted'` — weekly ranking — **PROPOSED, M10**
+(gate D5):
+- `(user_id, created_at desc)` — profile history — **PROPOSED**, with the profile history
+  endpoint (M12).
+- ~~`(status, score desc)` and `(status, started_at, score desc)`, partial on accepted~~ —
+  **withdrawn at M10.** Leaderboard reads use the projection (§5), never a sort over `runs`, so
+  no ranking query exists for them to serve. The projection's backfill and reconciliation scan
+  accepted runs once, in a migration.
 
 ### `run_events` — **not created** (DM-1 resolved, ANTI-5)
 
@@ -350,21 +353,90 @@ the criterion is met **and** the artwork exists.
 
 ---
 
-## 5. Leaderboards
+## 5. Leaderboards — **IMPLEMENTED (M10)**
 
-### Projection — PROPOSED
+The authoritative data is `runs`. The ranking is a **maintained PostgreSQL projection**
+(DM-2 resolved: a maintained table, not a partitioned table or materialized view; CACHE-3
+resolved: PostgreSQL, not Redis), written **inline by the accepted finish** (BA-3 resolved) and
+rebuildable from `runs` at any time. **Never a live sort over `runs`**, never a cache, and never
+Redis as the source of truth.
 
-The authoritative data is `runs`. The ranking is a **projection** — a
-materialized view or a maintained table — refreshed on write or on a short
-schedule. **Never a live sort over the whole table**, and never Redis as the
-source of truth.
+### `leaderboard_all_time` and `leaderboard_weekly`
 
-| Concern | Approach |
-| --- | --- |
-| Weekly window | Derived from `runs.started_at` per LB-1 |
-| Total order | `score desc`, then earliest achievement, then shorter duration, then a stable id — so pagination cannot duplicate or skip |
-| Pagination | **Cursor-based.** Offsets over a live ranking skip and repeat rows. |
-| The player's own rank | Always computed fresh; never served stale to the player it belongs to |
+| Column | All-time | Weekly | Notes |
+| --- | --- | --- | --- |
+| `week_start` | — | `date`, PK part | The Monday of the run's `started_at` in **Europe/Istanbul** (LB-1). CHECK: ISO day 1 |
+| `user_id` | `bigint` PK | `bigint` PK part | FK `users`, **ON DELETE RESTRICT** (E2) |
+| `run_id` | `uuid` **UNIQUE** | `uuid` **UNIQUE** | The **representative run**; FK `runs`, **ON DELETE RESTRICT** (E2) |
+| `score` | `integer` | `integer` | CHECK ≥ 0 |
+| `achieved_at` | `timestamp(3)` | `timestamp(3)` | The representative run's `finished_at` — the server acceptance time (D2) |
+| `duration_ms` | `integer` | `integer` | CHECK > 0; the representative run's claimed duration |
+| `created_at` / `updated_at` | `timestamp(3)` | `timestamp(3)` | |
+
+**No public identity is stored here** (D1): `display_name` is joined live from `users`, so a
+rename, a force-rename or a future anonymisation is never served stale from the projection.
+
+**Indexes:** `leaderboard_all_time_order (score DESC, achieved_at, duration_ms, run_id)` and
+`leaderboard_weekly_order (week_start, score DESC, achieved_at, duration_ms, run_id)` — ORDER
+itself, serving the page, the keyset predicate and both rank counts as index range scans. There
+is deliberately no `user_id`-leading index on `leaderboard_weekly`: nothing queries it that way,
+and the only statement that would — a `users` delete checking the RESTRICT key — cannot run
+while the player's runs exist (their own FK is RESTRICT too). SEC-3 revisits this with deletion.
+
+### ORDER — one comparator (E1)
+
+    score DESC, achieved_at ASC, duration_ms ASC, run_id ASC
+
+The **stable identifier** of tie-break rule 4 is the entry's **representative run id**. The same
+tuple, in the same direction, chooses each player's representative run (the upsert guard and
+the backfill's `DISTINCT ON`), orders the board (the `*_order` indexes, the keyset predicate,
+the cursor, both rank counts), and is restated independently in PHP by the property tests.
+`run_id` is unique per table and a run belongs to one player and one week, so the tuple is
+unique per row: **a strict total order the database enforces.** `run_id` rather than `user_id`
+makes "which of my runs represents me" and "who ranks first" literally one comparator, and keeps
+`users.id` out of the cursor. Neither identifier is ever exposed by the API.
+
+### Writes — the monotone upsert, and invariant M
+
+`App\Services\Leaderboards\LeaderboardProjector` is the only writer. On the **accepted**
+branch of the finish transaction — after the progression and ledger writes, before the run row
+update — it upserts the player's all-time row, then their weekly row:
+
+    INSERT … ON CONFLICT (pk) DO UPDATE SET run_id, score, achieved_at, duration_ms = EXCLUDED.*
+    WHERE EXCLUDED.score > t.score
+       OR (EXCLUDED.score = t.score
+           AND (EXCLUDED.achieved_at, EXCLUDED.duration_ms, EXCLUDED.run_id)
+             < (t.achieved_at, t.duration_ms, t.run_id))
+
+The guard is exactly "EXCLUDED precedes the row in ORDER". So the write is idempotent and **a
+row's ORDER key only ever moves earlier — invariant M.** M is what makes a multi-page traversal
+duplicate-free (`docs/api/endpoints/leaderboards.md`, consistency contract). **Anything that can
+move a row later — M13 run invalidation, SEC-3 deletion or anonymisation — breaks M** and must
+either accept possible duplicates in open traversals or invalidate outstanding cursors.
+
+- A replay returns before any write; a flagged or rejected run never reaches the projector.
+- A projector failure throws and rolls back the whole finish.
+- The lock order becomes **RUN → PROGRESSION → PAW_LEDGER → LB_ALL_TIME → LB_WEEKLY**. A player's
+  finishes are already serialised by the progression lock and different players write different
+  rows, so the projection adds no cross-player lock and no deadlock path. Reads take no locks.
+- A delayed finish updates the **past** week of its `started_at` (L3). A past week is final only
+  once no run started in it remains active — at most one per player.
+
+### Backfill and reconciliation
+
+Migration `create_leaderboard_tables` (release A) creates the tables and merges every accepted
+run already in `runs`: per window, `DISTINCT ON` picks the ORDER-first accepted run, and the rows
+go through the same monotone upsert. PostgreSQL computes the week key with its own IANA zone
+data — `date_trunc('week', (started_at AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Istanbul')::date`
+— and a test proves it equals the PHP key for boundary instants from 2015 (when Istanbul still
+observed DST) to 2028. Release B re-runs the merge and asserts the result (§5 reconciliation,
+added with it).
+
+### What M10 does not do
+
+No ban or opt-out filtering exists yet — the leaderboard reader keeps a single visibility
+predicate for M13 and LB-8 to extend. No cache (CACHE-4 stays open for later traffic). No pruning: past weeks are
+kept permanently; viewing them is LB-9, OPEN.
 
 ---
 
@@ -406,9 +478,9 @@ here.
 | Ref | Question |
 | --- | --- |
 | ~~DM-1~~ | **Resolved by ADR-0006 (ANTI-5).** Data minimization: **no `run_events` table**, and no raw per-event history. Validate at submission time and persist compact authoritative facts only. |
-| DM-2 | Weekly window: partitioned table, materialized view, or maintained table (LB-1) |
+| ~~DM-2~~ | **Resolved at M10:** a maintained PostgreSQL table, written inline by the accepted finish (§5). |
 | DM-3 | Retention for `runs`, `paw_ledger`, `audit_log` (SEC-3) |
-| DM-4 | What account deletion does to runs and leaderboard entries (LB-5, SEC-3) |
+| DM-4 | What account deletion does to runs and leaderboard entries (LB-5, SEC-3). The projection FKs are RESTRICT (E2) so deletion must handle them explicitly; that is not an LB-5 decision. |
 | DM-7 | Index strategy for the lifetime telemetry-derived counters once real query shapes exist. Deferred with the counters themselves — **ANTI-6**. |
 | **ANTI-6** | The four `DERIVED_TELEMETRY` columns on `runs` and `player_progression` are **not created at M9** because nothing in v1 can establish them. **Blocks M11.** |
 

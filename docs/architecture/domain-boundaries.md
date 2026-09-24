@@ -97,19 +97,24 @@ everything from an accepted run result.
 
 ---
 
-## 5. Leaderboards — APPROVED scope
+## 5. Leaderboards — APPROVED scope, **IMPLEMENTED (M10)**
 
-**Owns:** the ranking projection and its refresh, for the weekly and all-time
-windows.
+**Owns:** the ranking projection (`leaderboard_all_time`, `leaderboard_weekly`)
+and its maintenance, for the weekly and all-time windows —
+`App\Services\Leaderboards`.
 
 **Rules**
 - The authoritative source is the runs table in PostgreSQL. A cache or projection
-  is **never** the source of truth.
-- Ordering must be a **total order**, so pagination cannot duplicate or skip.
+  is **never** the source of truth; the projection is derived and rebuildable.
+- **Only an `accepted` run is projected.** Runs hands it over inside the finish
+  transaction, after Progression, exactly as it hands over progression.
+- Ordering is **one total order** (E1), used for choosing each player's
+  representative run and for ranking — see `data-model.md` §5.
 - A player's own rank is always computed fresh.
 
 **Boundary:** Leaderboards is **read-only** with respect to runs and progression.
-It projects; it never writes back.
+It projects; it never writes back. Public identity is read live from Identity,
+never copied.
 
 ---
 
