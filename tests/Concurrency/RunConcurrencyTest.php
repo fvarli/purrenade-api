@@ -386,6 +386,65 @@ it('replays a concurrent retry with the same key, rewarding once', function (): 
         ->and((int) DB::table('player_progression')->where('user_id', $user->id)->value('lifetime_paws'))->toBe(50);
 });
 
+it('establishes Loli evidence once for a concurrent retry with the same key (ANTI-6 P1)', function (): void {
+    $user = User::factory()->create();
+    $run = seedActiveRun($user, 60);
+    DB::table('runs')->where('id', $run)->update(['start_loli_cycle_paws' => 190]);
+    $key = (string) Str::uuid();
+
+    // F1 has written everything, its evidence last, and is parked uncommitted.
+    runWorkers()->pauseOn('run_loli_evidence', 'INSERT', 'f1');
+    runWorkers()->holdPause();
+    $f1 = spawnFinish(runWorkers(), 'f1', $user, $run, $key);
+    runWorkers()->waitUntilBlocked('f1');
+
+    $f2 = spawnFinish(runWorkers(), 'f2', $user, $run, $key);
+    runWorkers()->waitUntilBlocked('f2');
+
+    runWorkers()->releasePause();
+
+    $r1 = runWorkers()->result($f1);
+    $r2 = runWorkers()->result($f2);
+
+    expectNoDeadlock([$r1, $r2]);
+
+    expect($r1['body']['data']['status'])->toBe('accepted')
+        ->and($r2['body'])->toEqual($r1['body'])
+        ->and(DB::table('run_loli_evidence')->count())->toBe(1)
+        // floor((190 + 50) / 200)
+        ->and((int) DB::table('run_loli_evidence')->where('run_id', $run)->value('loli_activations'))->toBe(1);
+});
+
+it('lets a same-player start wait on a finish parked at its evidence, then record the new cycle', function (): void {
+    $user = User::factory()->create();
+    $run = seedActiveRun($user, 60);
+    DB::table('runs')->where('id', $run)->update(['start_loli_cycle_paws' => 190]);
+    DB::table('player_progression')->insert(['user_id' => $user->id, 'loli_cycle_paws' => 190, 'created_at' => now(), 'updated_at' => now()]);
+
+    runWorkers()->pauseOn('run_loli_evidence', 'INSERT', 'f');
+    runWorkers()->holdPause();
+    $f = spawnFinish(runWorkers(), 'f', $user, $run, (string) Str::uuid());
+    runWorkers()->waitUntilBlocked('f');
+
+    // The start waits on the run row F holds.
+    $s = spawnStart(runWorkers(), 's', $user, 'aysenur');
+    runWorkers()->waitUntilBlocked('s');
+
+    runWorkers()->releasePause();
+
+    $rf = runWorkers()->result($f);
+    $rs = runWorkers()->result($s);
+
+    expectNoDeadlock([$rf, $rs]);
+
+    // (190 + 50) % 200: the new run starts from the cycle F committed.
+    expect($rf['body']['data']['status'])->toBe('accepted')
+        ->and($rs['status'])->toBe(201)
+        ->and($rs['body']['data']['loli_cycle_paws'])->toBe(40)
+        ->and(DB::table('runs')->where('id', $rs['body']['data']['run_id'])->value('start_loli_cycle_paws'))->toBe(40)
+        ->and(DB::table('run_loli_evidence')->where('run_id', $run)->value('loli_activations'))->toBe(1);
+});
+
 it('refuses a concurrent finish under a different key once the first commits', function (): void {
     $user = User::factory()->create();
     $run = seedActiveRun($user, 60);

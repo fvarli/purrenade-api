@@ -11,6 +11,7 @@ use App\Http\Resources\ProgressionResource;
 use App\Models\Character;
 use App\Models\PlayerProgression;
 use App\Models\Run;
+use App\Models\RunLoliEvidence;
 use App\Models\User;
 use App\Services\Leaderboards\LeaderboardProjector;
 use App\Services\Progression\ProgressionService;
@@ -27,14 +28,15 @@ use RuntimeException;
  * its `started_at` before gameplay, and it classifies the finish and applies
  * progression — for an **accepted** run only — in one transaction.
  *
- * ## Lock order — RUN → PLAYER_PROGRESSION → PAW_LEDGER → LB_ALL_TIME → LB_WEEKLY (C-1)
+ * ## Lock order — RUN → PLAYER_PROGRESSION → PAW_LEDGER → LB_ALL_TIME → LB_WEEKLY → RUN_LOLI_EVIDENCE (C-1)
  *
  * Every transaction here that touches more than one of these takes them in
  * that order, and nothing else in the application locks two of them:
  *
  * - **Start** locks the RUN (the user's active run, `FOR UPDATE`, or the
  *   speculative insert under the partial unique index). It **never** locks
- *   progression — it only reads `loli_cycle_paws` with a plain `SELECT`.
+ *   progression — it only reads `loli_cycle_paws` with a plain `SELECT`, and
+ *   a created run persists that same value as `start_loli_cycle_paws`.
  * - **Finish** locks the RUN, then PROGRESSION `FOR UPDATE`, then appends to
  *   the PAW_LEDGER, then — for an accepted run only — upserts the player's
  *   LB_ALL_TIME row and then their LB_WEEKLY row (M10), then updates the RUN
@@ -42,6 +44,12 @@ use RuntimeException;
  *   player's finishes are already serialised by the progression lock, so two
  *   finishes never contend for them in the other order; different players
  *   write different rows. Leaderboard reads take no locks.
+ * - Last, for an accepted run only, it inserts the run's RUN_LOLI_EVIDENCE
+ *   row (ANTI-6 P1). It comes **after** the RUN update, not straight after
+ *   PAW_LEDGER: the table's `BEFORE INSERT` trigger admits a row only for a run
+ *   that is already `accepted` (E1), and the status is written by that update.
+ *   The row is new and keyed by the run this transaction holds, so it waits on
+ *   nothing and adds no deadlock path.
  * - The progression row's existence is ensured **before** either transaction
  *   opens, as its own autocommitted statement
  *   (`ProgressionService::ensure()`), so no run transaction ever waits on a
@@ -115,7 +123,11 @@ final class RunLifecycleService
                 $this->replaceStale($active, $receivedAt);
             }
 
-            $insertedId = $this->insertActiveRun($user->id, (int) $characterId, $receivedAt);
+            // The cycle this run starts from: read once, persisted with the run
+            // and returned to the client, so the two can never differ (ANTI-6 F1).
+            $startCycle = $this->readCyclePaws($user->id);
+
+            $insertedId = $this->insertActiveRun($user->id, (int) $characterId, $startCycle, $receivedAt);
 
             if ($insertedId === null) {
                 // A concurrent start committed an active run first; the
@@ -135,7 +147,7 @@ final class RunLifecycleService
 
             $run = Run::query()->findOrFail($insertedId);
 
-            return new StartedRun($run, $this->readCyclePaws($user->id), created: true);
+            return new StartedRun($run, $startCycle, created: true);
         });
     }
 
@@ -282,6 +294,11 @@ final class RunLifecycleService
             'result' => json_encode($result, JSON_THROW_ON_ERROR),
         ]);
 
+        // 9. RUN_LOLI_EVIDENCE — only once the run is `accepted` (E1).
+        if ($status === RunStatus::Accepted) {
+            $this->establishLoliEvidence($run, $telemetry->reportedRunPaws, $receivedAt);
+        }
+
         return new FinishOutcome($result, replayed: false);
     }
 
@@ -334,6 +351,40 @@ final class RunLifecycleService
         ]);
 
         return $progression;
+    }
+
+    /**
+     * The accepted run's Loli evidence (ANTI-6, Option B): how many Loli
+     * Bonuses it activated, derived from the cycle it **started** from — never
+     * the finish-time cycle, which a later recomputation may have moved.
+     *
+     * Zero paws is PRESENT 0 and gets a row, unlike the ledger. A run with no
+     * recorded start cycle was started before the column existed: it gets
+     * nothing, and nothing is substituted for the missing input — its evidence
+     * is ABSENT.
+     *
+     * The derivation equals the activations the client's domain actually had
+     * because the web domain's CI proves no Loli Bonus can be left queued at
+     * the end of a run (I-LOLI). `ON CONFLICT DO NOTHING`: the first row
+     * stands, and is never overwritten.
+     */
+    private function establishLoliEvidence(Run $run, int $runPaws, CarbonImmutable $receivedAt): void
+    {
+        if ($run->start_loli_cycle_paws === null) {
+            return;
+        }
+
+        DB::insert(
+            'INSERT INTO run_loli_evidence (run_id, loli_activations, evidence_version, established_at)
+             VALUES (?, ?, ?, ?)
+             ON CONFLICT (run_id) DO NOTHING',
+            [
+                $run->id,
+                intdiv($run->start_loli_cycle_paws + $runPaws, PlayerProgression::LOLI_THRESHOLD),
+                RunLoliEvidence::EVIDENCE_VERSION,
+                $this->timestamp($receivedAt),
+            ],
+        );
     }
 
     /**
@@ -406,17 +457,17 @@ final class RunLifecycleService
      *
      * @return string|null The new run's id, or null when another start won.
      */
-    private function insertActiveRun(int $userId, int $characterId, CarbonImmutable $receivedAt): ?string
+    private function insertActiveRun(int $userId, int $characterId, int $startCycle, CarbonImmutable $receivedAt): ?string
     {
         $now = $this->timestamp($receivedAt);
 
         /** @var object{id: string}|null $row */
         $row = DB::selectOne(
-            "INSERT INTO runs (id, user_id, character_id, status, seed, started_at, created_at, updated_at)
-             VALUES (?, ?, ?, 'active', ?, ?, ?, ?)
+            "INSERT INTO runs (id, user_id, character_id, status, seed, start_loli_cycle_paws, started_at, created_at, updated_at)
+             VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?)
              ON CONFLICT (user_id) WHERE status = 'active' DO NOTHING
              RETURNING id",
-            [(string) Str::uuid7(), $userId, $characterId, $this->seeds->next(), $now, $now, $now],
+            [(string) Str::uuid7(), $userId, $characterId, $this->seeds->next(), $startCycle, $now, $now, $now],
         );
 
         return $row?->id;

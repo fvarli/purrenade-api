@@ -35,6 +35,7 @@ use Illuminate\Support\Carbon;
  * @property array<string, mixed>|null $result
  * @property string|null $idempotency_key
  * @property string|null $idempotency_fingerprint
+ * @property int|null $start_loli_cycle_paws Null only for a run started before it was recorded: its Loli evidence is ABSENT.
  * @property Carbon|null $created_at
  * @property Carbon|null $updated_at
  * @property-read Character $character
@@ -63,6 +64,7 @@ class Run extends Model
             'run_paws' => 'integer',
             'validation_meta' => 'array',
             'result' => 'array',
+            'start_loli_cycle_paws' => 'integer',
         ];
     }
 
