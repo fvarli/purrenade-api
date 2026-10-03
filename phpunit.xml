@@ -17,6 +17,14 @@
             <directory>tests/Concurrency</directory>
         </testsuite>
     </testsuites>
+    <!-- The real-Node replay contract needs Node 24 at REPLAY_NODE_BINARY. It is
+         run explicitly, as the replay-node group, by the CI replay job, where a
+         missing binary fails rather than skips. -->
+    <groups>
+        <exclude>
+            <group>replay-node</group>
+        </exclude>
+    </groups>
     <source>
         <include>
             <directory>app</directory>

@@ -1,0 +1,123 @@
+#!/usr/bin/env bash
+#
+# Refresh the pinned ANTI-6 replay bundle from a clean web commit (O9).
+#
+#   bin/replay-pin <path-to-purrenade-web> <40-char web sha> --node <absolute node24> [--allow-unpublished]
+#
+# The API repository owns a PINNED COPY of the web repository's built replay
+# bundle, like the web repository pins this API's OpenAPI. This script is the
+# only way that copy changes. It:
+#
+#   1. requires the commit to exist in the web repository and to be reachable
+#      from its origin/main (--allow-unpublished downgrades that to a warning,
+#      for a commit that is committed locally but not yet pushed);
+#   2. clones the web repository into a temporary directory and checks out
+#      exactly that commit — the web working tree and its .git are never
+#      touched, so local uncommitted changes can never leak into a pin;
+#   3. with the given Node 24 first on PATH (inside this script only), runs
+#      `npm ci`, `npm run replay:build` and `npm run replay:check` — the web
+#      repository's own build and its own golden verification of the bundle;
+#   4. refuses unless the web build's manifest names exactly that commit —
+#      never `<sha>-dirty` or `unknown`;
+#   5. copies the bundle and the replay golden into
+#      resources/replay/domain-<DOMAIN_VERSION>/, writes manifest.json, and
+#      re-verifies both hashes.
+#
+# It never stages, commits or pushes anything. Review the diff, then commit it
+# with the web commit in the message. API deploys never build or fetch it.
+# See docs/architecture/replay-runtime.md.
+
+set -euo pipefail
+
+API_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+die() { printf '\n  ERROR: %s\n\n' "$1" >&2; exit 1; }
+info() { printf '  %s\n' "$1"; }
+
+[[ $# -ge 2 ]] || die "usage: bin/replay-pin <web-repo> <40-char sha> --node <absolute node24> [--allow-unpublished]"
+
+web_repo="$1"; shift
+sha="$1"; shift
+node_bin=""
+allow_unpublished=0
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --node) node_bin="${2:-}"; shift 2 ;;
+        --allow-unpublished) allow_unpublished=1; shift ;;
+        *) die "unknown argument: $1" ;;
+    esac
+done
+
+[[ "$sha" =~ ^[0-9a-f]{40}$ ]] || die "the web commit must be a full 40-character lowercase SHA"
+[[ -n "$node_bin" && "$node_bin" == /* && -x "$node_bin" ]] || die "--node must be an absolute path to an executable Node 24"
+[[ -d "$web_repo/.git" ]] || die "not a git repository: $web_repo"
+
+node_version="$("$node_bin" --version)"
+[[ "$node_version" =~ ^v24\. ]] || die "Node 24 is required to build the pin (got $node_version)"
+
+git -C "$web_repo" cat-file -e "${sha}^{commit}" 2>/dev/null || die "commit $sha does not exist in $web_repo"
+
+if ! git -C "$web_repo" merge-base --is-ancestor "$sha" origin/main 2>/dev/null; then
+    if [[ "$allow_unpublished" -eq 1 ]]; then
+        info "WARNING: $sha is not reachable from the web origin/main (allowed: --allow-unpublished)"
+    else
+        die "$sha is not reachable from the web origin/main; push it first, or pass --allow-unpublished"
+    fi
+fi
+
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+
+info "cloning web @ $sha into a temporary directory"
+git clone --quiet --no-checkout "$web_repo" "$work/web"
+git -C "$work/web" checkout --quiet --detach "$sha"
+
+(
+    cd "$work/web"
+    export PATH="$(dirname "$node_bin"):$PATH"
+    npm ci --no-audit --no-fund --loglevel=error
+    npm run --silent replay:build
+    npm run --silent replay:check
+)
+
+built="$work/web/.replay"
+manifest_web="$built/manifest.json"
+[[ -f "$manifest_web" && -f "$built/purrenade-replay.mjs" ]] || die "the web build produced no bundle"
+
+read -r domain_version bundle_sha node_major web_commit < <(
+    python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); print(m["domain_version"], m["sha256"], m["node_major"], m["web_commit"])' "$manifest_web"
+)
+
+[[ "$web_commit" == "$sha" ]] || die "the web build recorded web_commit=$web_commit, not the clean commit $sha"
+[[ "$domain_version" =~ ^[0-9]{1,8}$ ]] || die "unexpected domain_version: $domain_version"
+[[ "$node_major" == "24" ]] || die "unexpected node_major: $node_major"
+
+target="$API_DIR/resources/replay/domain-$domain_version"
+mkdir -p "$target"
+cp "$built/purrenade-replay.mjs" "$target/purrenade-replay.mjs"
+cp "$work/web/tests/support/replay-golden.json" "$target/golden.json"
+
+actual_bundle_sha="$(sha256sum "$target/purrenade-replay.mjs" | cut -d' ' -f1)"
+golden_sha="$(sha256sum "$target/golden.json" | cut -d' ' -f1)"
+[[ "$actual_bundle_sha" == "$bundle_sha" ]] || die "the copied bundle does not match the web manifest"
+
+python3 - "$target/manifest.json" "$domain_version" "$bundle_sha" "$node_major" "$web_commit" "$golden_sha" <<'PY'
+import json, sys
+path, dv, sha, major, commit, golden = sys.argv[1:]
+manifest = {
+    "domain_version": dv,
+    "sha256": sha,
+    "node_major": int(major),
+    "web_commit": commit,
+    "golden_sha256": golden,
+}
+with open(path, "w") as f:
+    f.write(json.dumps(manifest, indent=2) + "\n")
+PY
+
+info "pinned domain-$domain_version"
+info "  bundle  sha256 $bundle_sha"
+info "  golden  sha256 $golden_sha"
+info "  web     $web_commit (node $node_version)"
+info "nothing was staged or committed"

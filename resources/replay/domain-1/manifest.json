@@ -1,0 +1,7 @@
+{
+  "domain_version": "1",
+  "sha256": "a1e6e00ee42f0a73af1a242f1d1c449254388220f959806cae3a243e0149c070",
+  "node_major": 24,
+  "web_commit": "b28e7758c2668eeea1e5728859cf1537a0dd107d",
+  "golden_sha256": "29084d95dad8de5e73279bb5197edc95b0cabece7fe796466cb5df32a5ec789b"
+}

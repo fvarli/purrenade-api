@@ -129,10 +129,10 @@ jobs:
       - name: Every migration rolls back and re-applies
         run: |
           set -euo pipefail
-          # `down()` is only real if it runs. The M10 and M9 migrations first —
-          # the newest — then a full refresh, which runs every `down()` in
-          # reverse and every `up()` again.
-          DB_SEARCH_PATH=purrenade_test php artisan migrate:rollback --step=6 --force
+          # `down()` is only real if it runs. The ANTI-6 P3 and P1, M10 and M9
+          # migrations first — the newest ten — then a full refresh, which runs
+          # every `down()` in reverse and every `up()` again.
+          DB_SEARCH_PATH=purrenade_test php artisan migrate:rollback --step=10 --force
           DB_SEARCH_PATH=purrenade_test php artisan migrate --force
           DB_SEARCH_PATH=purrenade_test php artisan migrate:refresh --force
         env:
@@ -153,7 +153,7 @@ jobs:
         env:
           DB_PASSWORD: ci-only-not-a-secret
 
-      - name: Authentication secrets are never logged
+      - name: Authentication secrets and replay input are never logged
         run: |
           set -euo pipefail
           # This gate rested on a premise that was not true.
@@ -169,7 +169,7 @@ jobs:
           python3 - <<'EOF'
           import pathlib, re, sys
 
-          ALLOWED_WRITERS = {'app/Support/AuthLog.php', 'app/Support/BreachCheck.php'}
+          ALLOWED_WRITERS = {'app/Support/AuthLog.php', 'app/Support/BreachCheck.php', 'app/Support/RunReviewLog.php'}
 
           # A credential is a *variable* holding one, or an array *key* naming
           # one. Not a string value: `'method' => 'recovery_code'` is a label
@@ -179,7 +179,17 @@ jobs:
               r"|['\"](password|current_password|new_password|password_confirmation|recovery_code|two_factor_secret|plain_?text_token)['\"]\s*=>",
               re.I,
           )
-          LOG_CALL = re.compile(r"(?:Log::|AuthLog::|logger\(\)->|->log\()", re.I)
+          LOG_CALL = re.compile(r"(?:Log::|AuthLog::|RunReviewLog::|logger\(\)->|->log\()", re.I)
+
+          # ANTI-6 canonical replay input is never logged (data-protection §5):
+          # not the input, its decrypted or encoded forms, the replay process's
+          # stdin/stdout/stderr, or the document built from it.
+          REPLAY_INPUT = re.compile(
+              r"\$(input|decoded|document|stdin|stdout|stderr|events|canonical)\b"
+              r"|->(input|stdout|events|canonicalJson)\b"
+              r"|['\"](replay_input|input|events|stdin|stdout|stderr|document)['\"]\s*=>",
+          )
+          SECURITY_WRITER = re.compile(r"channel\(\s*(?:'security'|AuthLog::CHANNEL|self::CHANNEL)\s*\)")
 
           def log_calls(text):
               """Each logging call as one string, however many lines it spans."""
@@ -207,11 +217,11 @@ jobs:
           for path in sources:
               text = path.read_text(encoding='utf-8')
 
-              if "channel('security')" in text and str(path) not in ALLOWED_WRITERS:
+              if SECURITY_WRITER.search(text) and str(path) not in ALLOWED_WRITERS:
                   unknown_writers.append(str(path))
 
               for line_number, call in log_calls(text):
-                  if CREDENTIAL.search(call):
+                  if CREDENTIAL.search(call) or REPLAY_INPUT.search(call):
                       leaks.append(f'{path}:{line_number}: {call.strip()[:120]}')
 
           if unknown_writers:
@@ -222,12 +232,12 @@ jobs:
               sys.exit(1)
 
           if leaks:
-              print('ERROR: a credential-shaped value appears in a logging call:')
+              print('ERROR: a credential-shaped or replay-input value appears in a logging call:')
               for leak in leaks:
                   print('  ', leak)
               sys.exit(1)
 
-          print(f'no credential reaches any log; {len(ALLOWED_WRITERS)} known security-channel writer(s)')
+          print(f'no credential or replay input reaches any log; {len(ALLOWED_WRITERS)} known security-channel writer(s)')
           EOF
 
       - name: Record the PostgreSQL version gap
@@ -342,9 +352,79 @@ jobs:
         run: |
           set -euo pipefail
           DB_SEARCH_PATH=purrenade_test php artisan migrate:fresh --force
-          DB_SEARCH_PATH=purrenade_test php artisan migrate:rollback --step=6 --force
+          DB_SEARCH_PATH=purrenade_test php artisan migrate:rollback --step=10 --force
           DB_SEARCH_PATH=purrenade_test php artisan migrate --force
           DB_SEARCH_PATH=purrenade_test php artisan migrate:refresh --force
+        env:
+          DB_PASSWORD: ci-only-not-a-secret
+
+  # -------------------------------------------------------------------------
+  # ANTI-6 replay on the real runtime (P3, O9).
+  #
+  # The pinned bundle replayed by the real one-shot Node 24 process contract —
+  # the golden cases, a full finish → queue → Node → commit run, the
+  # secret-free environment, the timeout kill and the output bound — and the
+  # production preflight. Node 24 is set up here only; the API itself has no
+  # Node dependency and never builds the bundle. In this job a missing
+  # REPLAY_NODE_BINARY fails the group: it is never skipped.
+  # -------------------------------------------------------------------------
+  replay:
+    name: Replay on Node 24
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
+        with:
+          php-version: ${{ env.PHP_VERSION }}
+          extensions: pdo_pgsql, pgsql, mbstring, xml, curl, zip, bcmath, intl
+          coverage: none
+
+      # The same pinned release the web repository's CI uses.
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: '24'
+
+      - name: Name the Node 24 executable by absolute path
+        run: |
+          set -euo pipefail
+          NODE_BIN="$(command -v node)"
+          case "$NODE_BIN" in /*) ;; *) echo "node is not an absolute path: $NODE_BIN"; exit 1 ;; esac
+          "$NODE_BIN" --version | grep -q '^v24\.' || { echo "expected Node 24"; exit 1; }
+          echo "REPLAY_NODE_BINARY=${NODE_BIN}" >> "$GITHUB_ENV"
+
+      - name: Start the runner's native PostgreSQL
+        run: |
+          set -euo pipefail
+          if ! command -v pg_ctlcluster >/dev/null && ! command -v pg_isready >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y --no-install-recommends postgresql postgresql-client
+          fi
+          sudo systemctl start postgresql
+          for _ in $(seq 1 30); do pg_isready -h 127.0.0.1 -p 5432 && break; sleep 1; done
+          sudo -u postgres psql -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE ROLE purrenade LOGIN PASSWORD 'ci-only-not-a-secret';
+          CREATE DATABASE purrenade OWNER purrenade;
+          SQL
+
+      - name: Install from the lockfile
+        run: composer install --prefer-dist --no-interaction --no-progress
+
+      - name: Prepare the environment
+        run: |
+          cp .env.example .env
+          php artisan key:generate
+
+      - name: The replay contract on the real runtime
+        run: vendor/bin/pest --group=replay-node
+        env:
+          DB_PASSWORD: ci-only-not-a-secret
+
+      - name: The production preflight passes
+        run: php artisan replay:preflight
         env:
           DB_PASSWORD: ci-only-not-a-secret
 
@@ -603,6 +683,41 @@ jobs:
             exit 1
           fi
           echo "no dependency or build output tracked"
+
+      - name: Replay bundles match their pins
+        run: |
+          set -euo pipefail
+          # ANTI-6 O9: the API owns a pinned copy of the web repository's built
+          # replay bundle. Every pin must be byte-identical to its manifest, from
+          # a clean, full web commit, for Node 24 — or the build is red.
+          python3 - <<'EOF'
+          import hashlib, json, pathlib, re, sys
+
+          root = pathlib.Path('resources/replay')
+          pins = sorted(p for p in root.glob('domain-*') if p.is_dir())
+          if not pins:
+              sys.exit('ERROR: no pinned replay bundle under resources/replay')
+
+          sha = lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
+          for pin in pins:
+              m = json.loads((pin / 'manifest.json').read_text())
+              problems = []
+              if list(m) != ['domain_version', 'sha256', 'node_major', 'web_commit', 'golden_sha256']:
+                  problems.append('manifest members/order')
+              if pin.name != f"domain-{m.get('domain_version')}" or not re.fullmatch(r'[0-9]{1,8}', str(m.get('domain_version'))):
+                  problems.append('domain_version does not match the directory')
+              if not re.fullmatch(r'[0-9a-f]{40}', str(m.get('web_commit'))):
+                  problems.append(f"web_commit {m.get('web_commit')!r} is not a clean full commit")
+              if m.get('node_major') != 24:
+                  problems.append('node_major is not 24')
+              if sha(pin / 'purrenade-replay.mjs') != m.get('sha256'):
+                  problems.append('bundle sha256 mismatch')
+              if sha(pin / 'golden.json') != m.get('golden_sha256'):
+                  problems.append('golden sha256 mismatch')
+              if problems:
+                  sys.exit(f'ERROR: {pin}: ' + '; '.join(problems))
+              print(f"{pin.name}: sha256 {m['sha256']} from web {m['web_commit']}")
+          EOF
 
       - name: Check open questions carry reference ids
         run: |

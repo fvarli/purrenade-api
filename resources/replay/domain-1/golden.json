@@ -1,0 +1,502 @@
+[
+ {
+  "name": "42:healthy:0",
+  "document": {
+   "protocol": 1,
+   "domain_version": "1",
+   "seed": 42,
+   "start_loli_cycle_paws": 0,
+   "mode": "run",
+   "input": {
+    "format_version": 1,
+    "domain_version": "1",
+    "total_steps": 4333,
+    "events": [
+     [
+      77,
+      9
+     ],
+     [
+      106,
+      1
+     ],
+     [
+      398,
+      7
+     ],
+     [
+      0,
+      8
+     ],
+     [
+      595,
+      0
+     ],
+     [
+      21,
+      0
+     ],
+     [
+      169,
+      1
+     ],
+     [
+      68,
+      2
+     ],
+     [
+      79,
+      2
+     ],
+     [
+      174,
+      0
+     ],
+     [
+      55,
+      4
+     ],
+     [
+      2,
+      8
+     ],
+     [
+      243,
+      1
+     ],
+     [
+      199,
+      2
+     ],
+     [
+      41,
+      0
+     ],
+     [
+      205,
+      1
+     ],
+     [
+      384,
+      1
+     ],
+     [
+      87,
+      8
+     ],
+     [
+      377,
+      0
+     ],
+     [
+      0,
+      0
+     ],
+     [
+      320,
+      2
+     ],
+     [
+      80,
+      2
+     ],
+     [
+      147,
+      0
+     ],
+     [
+      223,
+      1
+     ],
+     [
+      92,
+      0
+     ]
+    ]
+   }
+  },
+  "expected": {
+   "protocol": 1,
+   "domain_version": "1",
+   "status": "completed",
+   "final": {
+    "ended": true,
+    "elapsed_ms_floor": 34591,
+    "score": 615,
+    "run_paws": 22,
+    "steps_consumed": 4333
+   },
+   "facts": {
+    "cone_safe_passes": 10,
+    "near_misses": 9,
+    "slayyy_activations": 0,
+    "loli_activations": 0
+   }
+  }
+ },
+ {
+  "name": "1337:aggressive:199",
+  "document": {
+   "protocol": 1,
+   "domain_version": "1",
+   "seed": 1337,
+   "start_loli_cycle_paws": 199,
+   "mode": "run",
+   "input": {
+    "format_version": 1,
+    "domain_version": "1",
+    "total_steps": 8591,
+    "events": [
+     [
+      77,
+      9
+     ],
+     [
+      106,
+      1
+     ],
+     [
+      398,
+      7
+     ],
+     [
+      0,
+      8
+     ],
+     [
+      444,
+      0
+     ],
+     [
+      151,
+      2
+     ],
+     [
+      79,
+      2
+     ],
+     [
+      179,
+      0
+     ],
+     [
+      222,
+      1
+     ],
+     [
+      86,
+      4
+     ],
+     [
+      2,
+      8
+     ],
+     [
+      196,
+      2
+     ],
+     [
+      47,
+      1
+     ],
+     [
+      283,
+      0
+     ],
+     [
+      260,
+      1
+     ],
+     [
+      237,
+      0
+     ],
+     [
+      136,
+      8
+     ],
+     [
+      142,
+      1
+     ],
+     [
+      225,
+      0
+     ],
+     [
+      23,
+      0
+     ],
+     [
+      307,
+      1
+     ],
+     [
+      95,
+      0
+     ],
+     [
+      682,
+      1
+     ],
+     [
+      23,
+      1
+     ],
+     [
+      0,
+      1
+     ],
+     [
+      167,
+      0
+     ],
+     [
+      23,
+      0
+     ],
+     [
+      0,
+      0
+     ],
+     [
+      251,
+      3
+     ],
+     [
+      239,
+      1
+     ],
+     [
+      20,
+      1
+     ],
+     [
+      461,
+      0
+     ],
+     [
+      21,
+      0
+     ],
+     [
+      663,
+      1
+     ],
+     [
+      41,
+      1
+     ],
+     [
+      711,
+      0
+     ],
+     [
+      187,
+      2
+     ],
+     [
+      51,
+      0
+     ],
+     [
+      132,
+      1
+     ],
+     [
+      82,
+      0
+     ],
+     [
+      758,
+      1
+     ],
+     [
+      82,
+      0
+     ],
+     [
+      68,
+      1
+     ],
+     [
+      95,
+      1
+     ],
+     [
+      122,
+      0
+     ]
+    ]
+   }
+  },
+  "expected": {
+   "protocol": 1,
+   "domain_version": "1",
+   "status": "completed",
+   "final": {
+    "ended": true,
+    "elapsed_ms_floor": 70075,
+    "score": 1538,
+    "run_paws": 56,
+    "steps_consumed": 8591
+   },
+   "facts": {
+    "cone_safe_passes": 34,
+    "near_misses": 26,
+    "slayyy_activations": 1,
+    "loli_activations": 1
+   }
+  }
+ },
+ {
+  "name": "90210:avoidant:150",
+  "document": {
+   "protocol": 1,
+   "domain_version": "1",
+   "seed": 90210,
+   "start_loli_cycle_paws": 150,
+   "mode": "run",
+   "input": {
+    "format_version": 1,
+    "domain_version": "1",
+    "total_steps": 5919,
+    "events": [
+     [
+      77,
+      9
+     ],
+     [
+      106,
+      0
+     ],
+     [
+      398,
+      7
+     ],
+     [
+      0,
+      8
+     ],
+     [
+      595,
+      1
+     ],
+     [
+      438,
+      0
+     ],
+     [
+      128,
+      4
+     ],
+     [
+      2,
+      8
+     ],
+     [
+      196,
+      1
+     ],
+     [
+      102,
+      0
+     ],
+     [
+      861,
+      8
+     ],
+     [
+      924,
+      1
+     ],
+     [
+      93,
+      0
+     ],
+     [
+      1356,
+      1
+     ],
+     [
+      89,
+      0
+     ]
+    ]
+   }
+  },
+  "expected": {
+   "protocol": 1,
+   "domain_version": "1",
+   "status": "completed",
+   "final": {
+    "ended": true,
+    "elapsed_ms_floor": 47808,
+    "score": 679,
+    "run_paws": 11,
+    "steps_consumed": 5919
+   },
+   "facts": {
+    "cone_safe_passes": 20,
+    "near_misses": 15,
+    "slayyy_activations": 0,
+    "loli_activations": 0
+   }
+  }
+ },
+ {
+  "name": "7:passive:0",
+  "document": {
+   "protocol": 1,
+   "domain_version": "1",
+   "seed": 7,
+   "start_loli_cycle_paws": 0,
+   "mode": "run",
+   "input": {
+    "format_version": 1,
+    "domain_version": "1",
+    "total_steps": 1759,
+    "events": [
+     [
+      77,
+      9
+     ],
+     [
+      504,
+      7
+     ],
+     [
+      0,
+      8
+     ],
+     [
+      1161,
+      4
+     ],
+     [
+      2,
+      8
+     ]
+    ]
+   }
+  },
+  "expected": {
+   "protocol": 1,
+   "domain_version": "1",
+   "status": "completed",
+   "final": {
+    "ended": true,
+    "elapsed_ms_floor": 13141,
+    "score": 179,
+    "run_paws": 4,
+    "steps_consumed": 1759
+   },
+   "facts": {
+    "cone_safe_passes": 2,
+    "near_misses": 2,
+    "slayyy_activations": 0,
+    "loli_activations": 0
+   }
+  }
+ }
+]

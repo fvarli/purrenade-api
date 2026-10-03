@@ -186,10 +186,12 @@ it('documents bonuses_triggered as threshold accounting, not activation', functi
 });
 
 it('rolls the M9 migrations back and forward cleanly', function (): void {
-    // Newest first, as a rollback runs: the M10 projection and the ANTI-6 P1
-    // evidence reference `runs`, so they go before the table they depend on and
-    // come back after it.
+    // Newest first, as a rollback runs: the M10 projection, the ANTI-6 P1
+    // evidence and the ANTI-6 P3 replay tables reference `runs`, so they go
+    // before the table they depend on and come back after it.
     $migrations = collect([
+        '2026_10_03_100100_create_run_replay_evidence_table.php',
+        '2026_10_03_100000_create_run_replay_inputs_table.php',
         '2026_09_29_100100_create_run_loli_evidence_table.php',
         '2026_09_29_100000_add_start_loli_cycle_paws_to_runs_table.php',
         '2026_09_24_100000_create_leaderboard_tables.php',
@@ -201,7 +203,7 @@ it('rolls the M9 migrations back and forward cleanly', function (): void {
 
     $migrations->each(fn (object $m) => $m->down());
 
-    foreach (['run_loli_evidence', 'leaderboard_weekly', 'leaderboard_all_time', 'paw_ledger', 'runs', 'player_progression', 'characters'] as $table) {
+    foreach (['run_replay_evidence', 'run_replay_inputs', 'run_loli_evidence', 'leaderboard_weekly', 'leaderboard_all_time', 'paw_ledger', 'runs', 'player_progression', 'characters'] as $table) {
         expect(Schema::hasTable($table))->toBeFalse();
     }
 
@@ -209,7 +211,7 @@ it('rolls the M9 migrations back and forward cleanly', function (): void {
 
     $migrations->reverse()->each(fn (object $m) => $m->up());
 
-    foreach (['run_loli_evidence', 'leaderboard_weekly', 'leaderboard_all_time', 'paw_ledger', 'runs', 'player_progression', 'characters'] as $table) {
+    foreach (['run_replay_evidence', 'run_replay_inputs', 'run_loli_evidence', 'leaderboard_weekly', 'leaderboard_all_time', 'paw_ledger', 'runs', 'player_progression', 'characters'] as $table) {
         expect(Schema::hasTable($table))->toBeTrue();
     }
 

@@ -5,6 +5,9 @@ declare(strict_types=1);
 namespace App\Providers;
 
 use App\Services\Leaderboards\LeaderboardWeek;
+use App\Services\Replay\NodeReplayRunner;
+use App\Services\Replay\ReplayBundles;
+use App\Services\Replay\ReplayRunner;
 use App\Services\Runs\RunValidationBounds;
 use App\Services\Runs\RunValidator;
 use App\Support\EnvironmentGuard;
@@ -28,6 +31,11 @@ class AppServiceProvider extends ServiceProvider
         // The week calendar takes its zone as a value — read here, from
         // `config/leaderboards.php`, and nowhere else at runtime.
         $this->app->singleton(LeaderboardWeek::class, fn (): LeaderboardWeek => LeaderboardWeek::fromConfig());
+
+        // ANTI-6 replay (P3): the pinned bundles under `config/replay.php`'s
+        // root, and the one-shot Node runner. Tests bind a fake runner.
+        $this->app->singleton(ReplayBundles::class, fn (): ReplayBundles => ReplayBundles::fromConfig());
+        $this->app->bind(ReplayRunner::class, NodeReplayRunner::class);
     }
 
     /**

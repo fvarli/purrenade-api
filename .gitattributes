@@ -21,3 +21,8 @@ composer.lock -diff
 .editorconfig   export-ignore
 .gitattributes  export-ignore
 .gitignore      export-ignore
+
+# Pinned ANTI-6 replay bundles: byte copies of a web build, verified by
+# SHA-256 against their manifest. Never normalised, never diffed.
+resources/replay/**/*.mjs        -text -diff
+resources/replay/**/golden.json  -text -diff
