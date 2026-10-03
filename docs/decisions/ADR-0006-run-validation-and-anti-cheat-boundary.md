@@ -1,6 +1,6 @@
 # ADR-0006 — Run validation and anti-cheat boundary
 
-- **Status:** **Accepted (2026-09-22); amended (2026-10-02) — see Amendment A.** M9 and M10 unblocked.
+- **Status:** **Accepted (2026-09-22); amended (2026-10-02, 2026-10-03) — see Amendment A.** M9 and M10 unblocked.
 - **Scope:** Product-wide
 - **Date:** 2026-09-12
 - **Decision owner:** Product owner + backend
@@ -8,6 +8,10 @@
 > **The largest architectural risk in v1.** No approved reference addressed it,
 > and a public leaderboard is in scope. Decided in full below; the one
 > consequence left open is **ANTI-6**, which blocks M11 only.
+>
+> *Update 2026-10-03:* the ANTI-6 semantics, the RNG-2 and ANTI-1 amendments and the ANTI-5
+> raw-input window are now decided (Amendment A). ANTI-6 implementation proceeds by phase, each
+> authorised separately.
 
 ## Context
 
@@ -181,11 +185,11 @@ portable so it remains available. Layer 4 stays rejected.**
 
 | # | Decision | Register |
 | --- | --- | --- |
-| 1 | **Layers 1 and 2 ship in v1.** Layer 1 is structural and gameplay plausibility validation. Layer 2 is server-issued run identity, a server-recorded start, a server-issued seed, and a server-owned run lifecycle. **Layer 3 deterministic replay is deferred beyond v1**; the pure domain stays free of browser APIs and ambient state so adding it later remains a deployment decision, not a rewrite. **No duplicate PHP simulation of the game rules** is written to obtain it. Layer 4 remains rejected as disproportionate. | ANTI-1 |
+| 1 | **Amended — see Amendment A (2026-10-03).** As originally accepted: **Layers 1 and 2 ship in v1.** Layer 1 is structural and gameplay plausibility validation. Layer 2 is server-issued run identity, a server-recorded start, a server-issued seed, and a server-owned run lifecycle. **Layer 3 deterministic replay is deferred beyond v1**; the pure domain stays free of browser APIs and ambient state so adding it later remains a deployment decision, not a rewrite. **No duplicate PHP simulation of the game rules** is written to obtain it. Layer 4 remains rejected as disproportionate. | ANTI-1 |
 | 2 | **A normal authoritative run requires connectivity to start.** The server creates the run before gameplay begins. Once started, **transient connectivity loss must not destroy the run**: the player continues the already-started run locally, and the finish submission may be retried when connectivity returns under the **same stable idempotency identity**. Starting a brand-new authoritative normal run fully offline is **out of scope for v1**. The tutorial stays isolated and submits no run. | PWA-1 |
 | 3 | **The seed for an authoritative normal run is server-issued.** The frontend initializes the deterministic run domain from that seed. A browser-generated seed is never authoritative. | RNG-1 |
 | 4 | **Amended — see Amendment A (2026-10-02).** As originally accepted: **No gameplay input log is submitted or retained in v1.** It belongs to the deferred Layer 3 design. A finish submission carries only the compact untrusted hints the adopted validation model actually consumes. | RNG-2 |
-| 5 | **Data minimization.** No `run_events` table is created, and no raw per-event gameplay history is retained merely because it may be useful later. Validation happens at submission time, and only the authoritative run record, compact authoritative derived facts, the minimum validation metadata needed to explain a classification, and the approved progression/ledger state are persisted. Any future raw-event retention is a separate privacy/retention decision. | ANTI-5 · DM-1 · GR-5 |
+| 5 | **Data minimization.** No `run_events` table is created, and no raw per-event gameplay history is retained merely because it may be useful later. Validation happens at submission time, and only the authoritative run record, compact authoritative derived facts, the minimum validation metadata needed to explain a classification, and the approved progression/ledger state are persisted. Any future raw-event retention is a separate privacy/retention decision. The transient raw-input window this row reserves as a separate decision was decided on 2026-10-03 (Amendment A): a 24-hour hard ceiling, deleted at the terminal outcome. | ANTI-5 · DM-1 · GR-5 |
 | 6 | **Structural rejection is separated from tuning-dependent flagging** — see below. PROPOSED tuning values are **not** promoted to APPROVED in order to obtain a rejection threshold. | ANTI-4 |
 | 7 | **Three explicit outcomes** — `ACCEPTED`, `FLAGGED`, `REJECTED` — with the side effects fixed below. | ANTI-2 · ANTI-3 · GR-1 · GR-2 |
 | 8 | **One active authoritative normal run per user**, enforced as a database invariant. | GR-4 |
@@ -303,6 +307,9 @@ nor M10. Choosing between adding Layer 3, designing another server-verifiable me
 changing the affected achievement and unlock behaviour is a product decision for the M11
 architecture decision, and is **not** pre-empted here.
 
+> *Note 2026-10-03:* ANTI-6 has since been decided — see Amendment A. This section stays as the
+> M9 record.
+
 ## Implementation parameters for M9 planning
 
 These are engineering parameters, not open product decisions. Selecting them does not reopen
@@ -340,12 +347,27 @@ settled, and that change is M9 implementation work.
 unknown, and retrofitting validation after runs are already recorded means deciding what to do
 with a table of unverifiable history.
 
-## Amendment A — 2026-10-02: the canonical input stream for ANTI-6 replay (RNG-2)
+## Amendment A — 2026-10-02 and 2026-10-03: the canonical input stream (RNG-2) and post-acceptance replay evidence (ANTI-1)
 
-**Status: APPROVED by the product owner on 2026-10-02 (ANTI-6 O2).** It amends **decision 4
-(RNG-2) only.** Decision 1 (ANTI-1) is **not** amended: whether Layer 3 ships in v1 as an
-asynchronous evidence mechanism is ANTI-6 **O1**, and it is still **OPEN**. Nothing below makes
-replay part of run acceptance.
+**Status: APPROVED by the product owner** — on 2026-10-02 for **decision 4 (RNG-2)** (ANTI-6
+O2), and on 2026-10-03 for **decision 1 (ANTI-1)** (ANTI-6 O1), together with the ANTI-5
+raw-input window (O3) that decision 5 reserves. Nothing below makes replay part of run
+acceptance.
+
+**ANTI-1 (decision 1), amended text (2026-10-03):**
+
+> Layers 1 and 2 ship in v1 and remain the **only** run-acceptance boundary. Layer 3 deterministic
+> replay ships in v1 **solely as an asynchronous, post-acceptance evidence mechanism** for the
+> ANTI-6 facts (cone safe passes, near misses, SLAYYY activations). It executes the same
+> TypeScript domain in a Node runtime. It never participates in, delays or changes run
+> acceptance, and its outcome never changes a run's status (ANTI-6-M). Layer 3 as an acceptance
+> gate remains deferred beyond v1. No duplicate PHP simulation of the game rules is written.
+> Layer 4 remains rejected.
+
+**Never an acceptance gate.** Replay failure, absence, expiry, a deterministic or contract
+failure, or an inconsistency never retroactively rejects an otherwise accepted run. The only
+route to that is the separately approved invalidation mechanism (PS-5, an audited M13 admin
+action).
 
 **Why it is an amendment and not a new ADR.** The acceptance boundary — Layers 1 and 2, the
 three outcomes, the server-owned lifecycle — is unchanged. What changes is that a normal run may
@@ -366,10 +388,20 @@ amendment, recorded the way ADR-0005 recorded its own.
 - **It authorises** the web domain to record that stream and to provide the headless replay
   entry that consumes it (ANTI-6 phase P2): a `DOMAIN_VERSION`, the canonical recorder, and a
   Node replay bundle built from the same TypeScript domain.
-- **It does not authorise** sending the stream (ANTI-6 P4), or storing or replaying it on the
-  server (ANTI-6 P3). Those wait on O1, on the ANTI-5 raw-input window (O3), on the production
-  scheduler (O8), and on the replay hosting decision (O9).
+- **O1 and O3 are now decided (2026-10-03),** with the production scheduler (O8) and the
+  replay hosting (O9). Storing and replaying the stream on the server is ANTI-6 P3, authorised
+  only through its own implementation session; sending it is P4; and evaluating
+  replay-dependent achievements is P5, which waits on O7 (still OPEN).
 - **Decision 5 (data minimisation) still holds.** No `run_events` table is created, and no
   per-event history is kept. The stream is transient by definition, and its lifetime is the
   separate ANTI-5 decision this amendment points to rather than makes.
 - **No duplicate PHP simulation** is written. The replay runs the TypeScript domain.
+
+**The ANTI-5 raw-input window (O3, 2026-10-03).** The canonical stream is transient sensitive
+evidence material. It has a **24-hour hard ceiling** from receipt — a recovery bound, not a
+retention target — and is deleted as soon as its replay reaches a terminal outcome, and on
+invalidation where applicable. The ceiling is a hard **logical** bound — the input is unusable
+from that instant, checked when it is used and again when its outcome commits — and a
+scheduler-driven sweeper clears expired bytes promptly, without relying on traffic. It is encrypted at rest with the `APP_KEY`-backed encrypter. An input that no longer
+decrypts ends with ABSENT evidence and never rejects the run. Its data is excluded from migration
+and pre-deploy dumps. The full record is the frontend repository's `docs/product/anti-6-implementation-architecture.md` §19.2.

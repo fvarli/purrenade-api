@@ -172,7 +172,21 @@ transient connectivity loss does not destroy it — the player continues locally
 finish submission is retried under the same idempotency identity. Starting a brand-new
 authoritative run fully offline is out of scope for v1.
 
-### Layer 3 — Telemetry replay — **deferred beyond v1; kept available**
+### Layer 3 — Telemetry replay — **ships in v1 as post-acceptance evidence only; deferred as an acceptance gate**
+
+> **Amended 2026-10-03 (ANTI-1, ADR-0006 Amendment A; ANTI-6 O1) — implemented by ANTI-6 P3**
+> (production activation follows the P3 deploy and its bootstrap).
+> Layer 3 deterministic replay ships in v1 **solely as an asynchronous, post-acceptance
+> evidence mechanism** for three ANTI-6 facts (cone safe passes, near misses, SLAYYY
+> activations). It runs the same TypeScript domain, as a pinned bundle in a one-shot Node 24
+> process on the API's replay worker. It **never** participates in, delays or changes run
+> acceptance: replay absence, expiry, failure or inconsistency never rejects an accepted run —
+> only the separately approved, audited M13 invalidation can. Layers 1 and 2 remain the only
+> acceptance boundary, and Layer 3 as an acceptance gate stays deferred beyond v1. No PHP
+> simulation of the rules exists. The finish accepts the optional canonical stream
+> (`replay_input`) under the ANTI-5 window (O3: 24 hours, encrypted, deleted at the outcome).
+> See [`../architecture/replay-runtime.md`](../architecture/replay-runtime.md). The text below
+> is the original Layer 3 analysis.
 
 The client submits the seed and a compressed input log; the server re-runs **the
 same pure domain** and derives the score itself.
@@ -455,6 +469,15 @@ A rate-limit refusal must not consume the idempotency slot.
 ---
 
 ## 8. What v1 cannot establish — OPEN (ANTI-6)
+
+> **Update 2026-10-03 — ANTI-6 is decided and being implemented by phase.** Actual Loli
+> activations are server-derived per accepted run at acceptance (`run_loli_evidence`, P1).
+> Cone safe passes, near misses and SLAYYY activations are established by post-acceptance
+> replay, all three together or not at all (`run_replay_evidence`, P3). Both are insert-only;
+> a missing row is ABSENT, never zero. Nothing reads them yet: evaluating the achievements that
+> depend on them is P5, and where replay-dependent evaluation sits is **O7**, still OPEN. The
+> text below is the M9 record and still holds for client aggregates, which remain inputs to
+> nothing.
 
 Layers 1 and 2 can **bound** a number. They cannot **establish** one that depends on what
 the player did. Four run-level facts are exactly that:

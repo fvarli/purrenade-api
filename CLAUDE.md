@@ -37,8 +37,9 @@ Never silently promote PROPOSED or OPEN to APPROVED.
 
 **Two ADRs gated implementation; both are now accepted and must not be re-litigated:**
 - ADR-0005 — authentication transport and 2FA strategy (implemented at M2/M3)
-- ADR-0006 — run validation / anti-cheat boundary (implemented at M9; ANTI-6 stays
-  OPEN and blocks M11)
+- ADR-0006 — run validation / anti-cheat boundary (implemented at M9; ANTI-6 decided
+  in Amendment A and implemented by separately authorised phase; O7 stays OPEN and
+  blocks the replay-dependent achievements of P5/M11)
 
 ## Non-negotiable engineering rules
 
