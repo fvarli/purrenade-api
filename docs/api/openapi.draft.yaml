@@ -1114,7 +1114,20 @@ paths:
 
         The effective request is the run and the three telemetry integers. Any
         other body member is ignored: it is not persisted, not fingerprinted, and
-        cannot make a genuine retry look different.
+        cannot make a genuine retry look different. The optional `replay_input`
+        is not fingerprinted either; on a retry the first stored log stands.
+
+        **Optional `replay_input` (ANTI-6 P3; ADR-0006 Amendment A).** The run's
+        canonical input stream, for **post-acceptance** replay evidence only. It
+        never affects classification, the response, or the status code: a missing,
+        malformed or unsupported log is never a `422`, and costs the run nothing but
+        its replay evidence. It is recorded only for an `accepted` run, encrypted,
+        for at most 24 hours, and replayed asynchronously; whatever the replay
+        finds, an accepted run stays accepted. See `ReplayInput`.
+
+        **Body size.** The body is bounded at **256 KiB** (`413 payload_too_large`).
+        The largest conforming body is about 220 KB; a client omits the optional log
+        rather than exceed the bound.
 
         The client **proposes**; the server **decides**. The response carries the
         server's outcome and the resulting progression, and the client displays
@@ -1202,6 +1215,15 @@ paths:
             a string, a float including `12.0`, a boolean, null, an object, or a number
             beyond int64 — or a missing or non-UUID `Idempotency-Key` (field
             `idempotency_key`). Nothing is recorded; the run stays active.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '413':
+          description: |
+            `payload_too_large` — the body exceeds 256 KiB. Nothing is read, recorded or
+            classified; the run stays active. A conforming client never meets this: the
+            only large member is the optional `replay_input`, whose largest conforming
+            encoding is about 220 KB, and a client omits it rather than exceed the bound.
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/Problem' }
@@ -2235,7 +2257,8 @@ components:
         The same payload is returned when an active run already existed (`200`), with that
         run's own `character_id`, `seed` and `started_at` — so a client that lost its local
         state resumes deterministically instead of starting a second run. Mid-run state is
-        never restored: there is no input log (RNG-2).
+        never restored: no input log is kept for that (RNG-2; the ANTI-6 `replay_input`
+        is a post-acceptance evidence stream, never a resume mechanism).
       properties:
         run_id: { type: string, format: uuid, description: Opaque identifier for the run. Referenced when finishing it. }
         character_id: { type: string, description: 'Public catalogue key of the character this run is played as. On resume, the run''s original character.' }
@@ -2267,16 +2290,76 @@ components:
         **Unknown members are ignored** — never persisted, never part of the idempotency
         fingerprint. That includes the ANTI-6 counters (`reported_loli_activations`,
         `reported_near_miss_count`, `reported_lane_blocking_passes`,
-        `reported_slayyy_activations`, `reported_peak_queued_loli_bonuses`): the facts they
-        describe cannot be established in v1, so a client's count of them is an input to
-        nothing. The shape they would take is retained in `docs/api/endpoints/game-runs.md`.
+        `reported_slayyy_activations`, `reported_peak_queued_loli_bonuses`): a client's
+        count of a fact is an input to nothing. The facts are established only by the
+        server — Loli by derivation, the others by replaying `replay_input` — and are
+        not reported here.
 
         **ANTI-5 is resolved: data minimization.** No `run_events` table exists and no raw
-        per-event gameplay history is retained. **No input log (RNG-2).** No `run_token`: the
-        run is identified by the path `runId` and the authenticated actor.
+        per-event gameplay history is retained. The optional `replay_input` is the one
+        exception the owner decided (ADR-0006 Amendment A, RNG-2 and ANTI-5): transient,
+        encrypted, never logged, unusable after 24 hours, and deleted at its replay's
+        outcome. No `run_token`: the run is identified by the path `runId` and the
+        authenticated actor.
       properties:
         telemetry: { $ref: '#/components/schemas/RunTelemetry' }
+        replay_input: { $ref: '#/components/schemas/ReplayInput' }
       required: [telemetry]
+
+    ReplayInput:
+      type: object
+      description: |
+        **OPTIONAL. UNTRUSTED. Post-acceptance evidence input only (ANTI-6 P3).**
+
+        The canonical domain `step()` invocation stream of a normal run — never raw
+        browser events, timestamps, positions, device data or any client-computed
+        count (ADR-0006 Amendment A). The server replays it asynchronously, after the
+        finish has been answered, in the pinned build of the same TypeScript domain, and
+        establishes the run's cone-safe-pass, near-miss and SLAYYY evidence only if the
+        replay reproduces the accepted score, paws and duration exactly.
+
+        **It can never change the finish.** A log that is absent, malformed, of an
+        unsupported version, longer than the run's own server window allows, or that
+        fails to replay consistently is **never a `422`** and never affects
+        classification, the response or the run's status: the run simply has no replay
+        evidence. The bounds below describe what can be **usable**; a value outside them
+        is accepted on the wire and discarded.
+
+        Recorded only for an `accepted` run. Stored encrypted, never logged, unusable
+        24 hours after the finish and deleted as soon as its replay reaches an outcome.
+        It is not part of the idempotency fingerprint; on a retry the first log stands.
+
+        **Encoding (`format_version` 1).** `events` is a list of `[gap, code]` pairs.
+        `gap` is the number of fixed steps since the previous event's position. Codes
+        `0`–`6` are inputs to the fixed step at that position (`move_left`,
+        `move_right`, `jump`, `slayyy`, `pause`, `resume`, `tutorial_skip`); codes
+        `7`–`9` are zero-delta control invocations (`pause`, `resume`, `tutorial_skip`)
+        made before that position's step. A client omits the log rather than exceed the
+        caps.
+      properties:
+        format_version:
+          type: integer
+          enum: [1]
+          description: The encoding version.
+        domain_version:
+          type: string
+          pattern: '^[0-9]{1,8}$'
+          description: The client domain's `DOMAIN_VERSION`. Replayable only when the server has that version's bundle pinned.
+        total_steps:
+          type: integer
+          minimum: 0
+          maximum: 432000
+          description: Fixed steps the client simulated (432000 is one hour at 120 Hz).
+        events:
+          type: array
+          maxItems: 20000
+          description: '`[gap, code]` pairs; `gap` 0–432000 with Σgap ≤ `total_steps`, `code` 0–9.'
+          items:
+            type: array
+            minItems: 2
+            maxItems: 2
+            items: { type: integer, minimum: 0, maximum: 432000 }
+      required: [format_version, domain_version, total_steps, events]
 
     RunTelemetry:
       type: object

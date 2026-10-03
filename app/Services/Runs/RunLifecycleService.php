@@ -15,6 +15,8 @@ use App\Models\RunLoliEvidence;
 use App\Models\User;
 use App\Services\Leaderboards\LeaderboardProjector;
 use App\Services\Progression\ProgressionService;
+use App\Services\Replay\ReplayInputCandidate;
+use App\Services\Replay\ReplayInputStore;
 use Carbon\CarbonImmutable;
 use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Facades\DB;
@@ -28,7 +30,7 @@ use RuntimeException;
  * its `started_at` before gameplay, and it classifies the finish and applies
  * progression — for an **accepted** run only — in one transaction.
  *
- * ## Lock order — RUN → PLAYER_PROGRESSION → PAW_LEDGER → LB_ALL_TIME → LB_WEEKLY → RUN_LOLI_EVIDENCE (C-1)
+ * ## Lock order — RUN → PLAYER_PROGRESSION → PAW_LEDGER → LB_ALL_TIME → LB_WEEKLY → RUN_LOLI_EVIDENCE → RUN_REPLAY_INPUTS (C-1)
  *
  * Every transaction here that touches more than one of these takes them in
  * that order, and nothing else in the application locks two of them:
@@ -50,6 +52,14 @@ use RuntimeException;
  *   that is already `accepted` (E1), and the status is written by that update.
  *   The row is new and keyed by the run this transaction holds, so it waits on
  *   nothing and adds no deadlock path.
+ * - After it, for an accepted run whose finish carried a `replay_input`, the
+ *   run's RUN_REPLAY_INPUTS work row (ANTI-6 P3) — new, keyed by the held run,
+ *   and admitted by the same kind of `accepted` trigger. Its replay job is
+ *   dispatched only after this transaction commits.
+ * - The **replay commit** (`ReplayEvidenceService`, outside any finish) takes
+ *   RUN → PLAYER_PROGRESSION → RUN_REPLAY_INPUTS → RUN_REPLAY_EVIDENCE: the
+ *   same prefix, so it serialises with finish — and with M13 invalidation —
+ *   on the run row and the progression row, never in the opposite order.
  * - The progression row's existence is ensured **before** either transaction
  *   opens, as its own autocommitted statement
  *   (`ProgressionService::ensure()`), so no run transaction ever waits on a
@@ -71,6 +81,7 @@ final class RunLifecycleService
         private readonly RunValidator $validator,
         private readonly RunSeedGenerator $seeds,
         private readonly LeaderboardProjector $leaderboards,
+        private readonly ReplayInputStore $replayInputs,
     ) {}
 
     /**
@@ -157,9 +168,19 @@ final class RunLifecycleService
      * Idempotent on `(user, key)`: the same key with the same effective request
      * returns the stored result and writes nothing; with a different request it
      * is a 409. A run that is no longer active answers 409 to any other key.
+     *
+     * `$replayInput` is the optional ANTI-6 canonical stream, already reduced to
+     * usable/unusable at the boundary. It is outside the fingerprint, never
+     * affects classification, and is recorded only for an accepted run — so on
+     * an idempotent replay nothing new is written and the first log stands.
      */
-    public function finish(User $user, string $runId, RunTelemetry $telemetry, string $idempotencyKey): FinishOutcome
-    {
+    public function finish(
+        User $user,
+        string $runId,
+        RunTelemetry $telemetry,
+        string $idempotencyKey,
+        ?ReplayInputCandidate $replayInput = null,
+    ): FinishOutcome {
         $runId = strtolower($runId);
         $idempotencyKey = strtolower($idempotencyKey);
         $fingerprint = FinishFingerprint::of($runId, $telemetry);
@@ -171,7 +192,7 @@ final class RunLifecycleService
 
         try {
             return DB::transaction(fn (): FinishOutcome => $this->finishLocked(
-                $user, $runId, $telemetry, $idempotencyKey, $fingerprint, $receivedAt,
+                $user, $runId, $telemetry, $idempotencyKey, $fingerprint, $receivedAt, $replayInput,
             ));
         } catch (UniqueConstraintViolationException $e) {
             // Backstop for an interleaving the run-row lock does not serialise:
@@ -189,6 +210,7 @@ final class RunLifecycleService
         string $idempotencyKey,
         string $fingerprint,
         CarbonImmutable $receivedAt,
+        ?ReplayInputCandidate $replayInput,
     ): FinishOutcome {
         // 1. RUN. Owner-scoped: another player's run is indistinguishable from
         //    one that does not exist.
@@ -295,8 +317,18 @@ final class RunLifecycleService
         ]);
 
         // 9. RUN_LOLI_EVIDENCE — only once the run is `accepted` (E1).
+        // 10. RUN_REPLAY_INPUTS — accepted only; a flagged or rejected run's
+        //     log is dropped unread. Replay is evidence, never a gate (ANTI-1).
         if ($status === RunStatus::Accepted) {
             $this->establishLoliEvidence($run, $telemetry->reportedRunPaws, $receivedAt);
+
+            $this->replayInputs->record(
+                $run,
+                $replayInput,
+                $windowMs,
+                (int) config('game_runs.duration_tolerance_ms'),
+                $receivedAt,
+            );
         }
 
         return new FinishOutcome($result, replayed: false);

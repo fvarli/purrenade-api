@@ -17,6 +17,7 @@ use App\Http\Controllers\Leaderboards\LeaderboardController;
 use App\Http\Controllers\Progression\ProgressionController;
 use App\Http\Controllers\Progression\TutorialController;
 use App\Http\Controllers\Runs\GameRunController;
+use App\Http\Middleware\LimitFinishBody;
 use App\Support\RateLimits;
 use Illuminate\Support\Facades\Route;
 
@@ -219,8 +220,10 @@ Route::prefix('v1')->group(function (): void {
             ->middleware('throttle:'.RateLimits::GAME_RUNS)
             ->name('game-runs.start');
 
+        // The finish body is bounded at 256 KiB (413 `payload_too_large`):
+        // the optional ANTI-6 replay log is its only large member.
         Route::post('/game-runs/{runId}/finish', [GameRunController::class, 'finish'])
-            ->middleware('throttle:'.RateLimits::GAME_RUNS)
+            ->middleware(['throttle:'.RateLimits::GAME_RUNS, LimitFinishBody::class])
             ->whereUuid('runId')
             ->name('game-runs.finish');
 

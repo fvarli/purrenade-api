@@ -62,11 +62,21 @@ a fresh run, and mid-run state is never restored (no input log).
 | Same key, different run or telemetry | `409 idempotency_key_reused` |
 | Run already final (other key, or replaced by a later start) | `409 run_not_active` |
 | Classified | `200` with `status` `accepted` / `flagged` / `rejected` and stable `reasons` |
+| Body larger than 256 KiB | `413 payload_too_large` (the application's limit; nginx's ceiling sits above it); nothing read or recorded, run stays active |
 
 `score` and `run_paws` are `null` for `rejected`. The effective request is the run and the three
 integers; **any other member is ignored** — not persisted, not fingerprinted — including every
 ANTI-6 counter. `achievements_unlocked` and `characters_unlocked` are always `[]` until M11.
 `is_personal_best` is true only for an accepted run that beat the previous best.
+
+**Optional `replay_input` (ANTI-6 P3, ADR-0006 Amendment A).** The canonical `step()` stream
+`{format_version: 1, domain_version, total_steps, events: [[gap, code], …]}`, for
+**post-acceptance replay evidence only**. It never changes the response, the status code, the
+classification or the fingerprint — an absent, malformed, unsupported or over-long log is
+**never a `422`**; it only costs the run its replay evidence. Recorded only for an `accepted`
+run, encrypted, unusable after 24 hours, deleted at its replay's outcome; on a same-key retry
+the first log stands. Caps: 20 000 events, 432 000 steps. See `ReplayInput` in the OpenAPI
+document and [`../../architecture/replay-runtime.md`](../../architecture/replay-runtime.md).
 
 ---
 
@@ -277,6 +287,13 @@ violation of the rule above, M9 returns none of them. See the boundary below and
 
 ### What M9 does not establish — OPEN (ANTI-6)
 
+> *Update 2026-10-03:* ANTI-6 is decided (ADR-0006 Amendment A). Actual Loli activations are
+> derived server-side at acceptance (P1), and cone safe passes, near misses and SLAYYY
+> activations are established by post-acceptance replay of the optional `replay_input` (P3), as
+> insert-only evidence rows. **The response shape is unchanged in P3** — no `derived_facts`, no
+> evidence values, no replay status — and no achievement reads the evidence yet (P5; O7 OPEN).
+> The section below is the M9 record.
+
 Four run-level facts depend on **what the player did**, not on what the world generated.
 Layers 1 and 2 cannot establish them; only Layer 3, or an equivalent separately approved
 trustworthy mechanism, can — and Layer 3 is deferred beyond v1.
@@ -354,9 +371,10 @@ Only the compact untrusted hints Layer 1 actually consumes:
 | `reported_score` | Untrusted hint |
 | `reported_run_paws` | Untrusted hint |
 
-**No input log (RNG-2).** The client submits no gameplay input trace; that belongs to the
-deferred Layer 3 design. The seed is never client-supplied — the server issued it and stored
-it against the run.
+**No input log for classification (RNG-2, as amended).** Since ANTI-6 P3 the finish may also
+carry the optional `replay_input` above — solely for post-acceptance replay evidence, never an
+input to classification. The seed is never client-supplied — the server issued it and stored
+it against the run, and the replay takes it from there.
 
 ### Tutorial — APPROVED
 

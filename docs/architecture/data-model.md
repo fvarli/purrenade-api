@@ -190,6 +190,49 @@ permitted.
 **Any future raw-event retention requires a separate privacy/retention decision** (SEC-3,
 SEC-5). It is not implied by ANTI-6 being resolved later.
 
+*Update 2026-10-03:* that separate decision was made for one transient stream (ANTI-6 O3) —
+see `run_replay_inputs` below. Still no `run_events` table, and no retained per-event history.
+
+### ANTI-6 evidence — **IMPLEMENTED (P1 Loli, P3 replay)**
+
+Two insert-only 1:1 tables are the **only** authoritative ANTI-6 evidence (E0); a missing row is
+ABSENT, never zero; 0 is PRESENT 0. Neither is read by anything yet (achievements are P5).
+
+| Table | Written by | Holds |
+| --- | --- | --- |
+| `run_loli_evidence` (P1) | the acceptance transaction | `loli_activations`, `evidence_version` |
+| `run_replay_evidence` (P3) | the replay commit transaction | `cone_safe_passes`, `near_misses`, `slayyy_activations` — all three or none — `evidence_version`, `domain_version` |
+
+Both: `run_id` PK and FK → `runs` **restrict**; non-negative CHECKs; a `BEFORE INSERT` trigger
+admits a row only for a run that is `accepted` at that moment (E1, `FOR SHARE`); a
+`BEFORE UPDATE OR DELETE` trigger refuses any change (E2). An invalidated run's evidence stays,
+excluded by `runs.status`.
+
+### `run_replay_inputs` — **IMPLEMENTED (P3)**, transient work, **never evidence** (W0)
+
+One row per accepted run whose finish carried a `replay_input`. Migration
+`2026_10_03_100000_create_run_replay_inputs_table`.
+
+| Column | Rule |
+| --- | --- |
+| `run_id` | PK, FK → `runs` restrict |
+| `state` | `pending` \| `terminal` |
+| `outcome_code` | NULL while pending; then one of the closed set in [`replay-runtime.md`](replay-runtime.md) §4 |
+| `attempts` | ≥ 0 |
+| `input` | `bytea`, the `APP_KEY`-encrypted canonical stream; **NULL once terminal**; ≤ 190 358 bytes (the measured maximum) |
+| `input_expires_at` | exactly `received_at + 24 h`: the hard logical boundary |
+
+- Shape CHECK: `pending` ⇒ input and expiry present, no outcome; `terminal` ⇒ an outcome and no
+  input. A terminal row is final (`BEFORE UPDATE` refuses), and rows are never deleted (SEC-5
+  and M14 will decide). An `accepted`-only `BEFORE INSERT` trigger as above.
+- Partial index `(input_expires_at) WHERE state = 'pending'` — the sweeper's only access path.
+- **Excluded from dump data** (`pg_dump --exclude-table-data`); a restore has it empty.
+
+**Lock orders.** Acceptance: RUN → PROGRESSION → PAW_LEDGER → LB_ALL_TIME → LB_WEEKLY → (RUN
+update) → RUN_LOLI_EVIDENCE → RUN_REPLAY_INPUTS. Replay commit: RUN (`FOR UPDATE`, re-check
+`accepted`) → PROGRESSION → RUN_REPLAY_INPUTS → RUN_REPLAY_EVIDENCE — the same prefix, so it
+serialises with finish and with M13 invalidation on the run row.
+
 ---
 
 ## 4. Progression

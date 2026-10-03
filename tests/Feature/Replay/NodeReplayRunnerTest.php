@@ -2,11 +2,18 @@
 
 declare(strict_types=1);
 
+use App\Models\User;
 use App\Services\Replay\NodeReplayRunner;
 use App\Services\Replay\ReplayBundle;
 use App\Services\Replay\ReplayBundles;
 use App\Services\Replay\ReplayRunnerFailure;
+use Carbon\CarbonImmutable;
 use Illuminate\Support\Facades\Artisan;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
+
+use function Pest\Laravel\travel;
+use function Pest\Laravel\travelTo;
 
 /**
  * The real process contract, against the real pinned bundle on the real Node
@@ -60,6 +67,42 @@ it('replays every pinned golden case to exactly its expected answer', function (
 it('passes the production preflight', function (): void {
     expect(Artisan::call('replay:preflight'))->toBe(0)
         ->and(Artisan::output())->toContain('ok golden domain-1 4/4');
+});
+
+it('establishes golden evidence end to end: finish, queue, Node, commit', function (): void {
+    travelTo(CarbonImmutable::parse('2026-10-03 12:00:00.000', 'UTC'));
+    $golden = json_decode((string) file_get_contents(pinnedBundle()->goldenPath), true)[0];
+    $expected = $golden['expected'];
+
+    $user = User::factory()->create();
+    $runId = startRun($user)->assertCreated()->json('data.run_id');
+
+    // The golden run's server-side inputs: its seed and start cycle.
+    DB::table('runs')->where('id', $runId)->update([
+        'seed' => $golden['document']['seed'],
+        'start_loli_cycle_paws' => $golden['document']['start_loli_cycle_paws'],
+    ]);
+    travel(40_000)->milliseconds();
+
+    finishRun($user, $runId, [
+        'telemetry' => [
+            'reported_duration_ms' => $expected['final']['elapsed_ms_floor'],
+            'reported_score' => $expected['final']['score'],
+            'reported_run_paws' => $expected['final']['run_paws'],
+        ],
+        'replay_input' => $golden['document']['input'],
+    ], (string) Str::uuid())->assertOk()->assertJsonPath('data.status', 'accepted');
+
+    $evidence = DB::table('run_replay_evidence')->where('run_id', $runId)->first();
+
+    expect(DB::table('run_replay_inputs')->where('run_id', $runId)->value('outcome_code'))->toBe('established')
+        ->and(DB::table('run_replay_inputs')->where('run_id', $runId)->value('input'))->toBeNull()
+        ->and($evidence->cone_safe_passes)->toBe($expected['facts']['cone_safe_passes'])
+        ->and($evidence->near_misses)->toBe($expected['facts']['near_misses'])
+        ->and($evidence->slayyy_activations)->toBe($expected['facts']['slayyy_activations'])
+        ->and($evidence->domain_version)->toBe('1')
+        ->and(DB::table('run_loli_evidence')->where('run_id', $runId)->value('loli_activations'))
+        ->toBe($expected['facts']['loli_activations']);
 });
 
 it('gives the process no secret, no NODE_OPTIONS and nothing from the host', function (): void {

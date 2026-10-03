@@ -83,6 +83,24 @@ resolves, the behavioural-personal-data surface described above is **not created
 **Any future raw-event retention is a separate privacy decision**, not something ANTI-6
 resolving later implies. The burden of justification falls on **retaining**, not on discarding.
 
+*Update 2026-10-03 (ANTI-6 O3; implemented in P3):* that separate decision was made for exactly
+one stream. A normal run's finish may carry its **canonical input stream** (`replay_input`:
+the domain `step()` invocations, never browser events) solely for the post-acceptance replay
+that establishes three of the facts. It is **transient sensitive evidence material**:
+
+- recorded only for an accepted run, **encrypted** at rest (`APP_KEY`), in
+  `run_replay_inputs.input`;
+- **unusable 24 hours after receipt** — a hard logical ceiling, enforced when it is used and
+  when its outcome commits — and **deleted** at its replay's terminal outcome, with an
+  every-minute sweeper clearing expired bytes promptly (best-effort through an outage);
+- **excluded from database dumps** (`pg_dump --exclude-table-data`), so a backup never extends
+  its life;
+- read only by the replay job; no admin, export or API read path; never logged (§5).
+
+What persists is only the compact per-run facts (`run_replay_evidence`) — the authoritative
+derived facts the table above already allows. See
+[`../architecture/replay-runtime.md`](../architecture/replay-runtime.md).
+
 **What remains OPEN as SEC-5** is the retention period for the data that *is* kept — the run
 records and their compact derived facts — together with the rest of §4.
 
@@ -137,7 +155,9 @@ request log records the window and the duration only.
 Passwords and hashes · tokens and session identifiers · 2FA secrets, TOTP codes,
 recovery codes · verification codes and reset tokens · email addresses · IP
 addresses · precise locations · full request/response bodies for authenticated
-endpoints.
+endpoints · **canonical replay input** (`replay_input`, `run_replay_inputs.input`, in any form —
+encrypted, decrypted or re-encoded) · the replay document and the replay process's stdin,
+stdout and stderr (ANTI-6 P3; only outcome codes, identifiers and counts are logged).
 
 **Redaction is applied at the logger**, not at each call site. See
 [`../architecture/observability.md`](../architecture/observability.md).

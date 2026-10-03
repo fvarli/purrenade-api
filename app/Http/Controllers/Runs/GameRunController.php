@@ -49,7 +49,13 @@ final class GameRunController extends Controller
         /** @var User $user */
         $user = $request->user();
 
-        $outcome = $this->runs->finish($user, $runId, $request->telemetry(), $request->idempotencyKey());
+        $outcome = $this->runs->finish(
+            $user,
+            $runId,
+            $request->telemetry(),
+            $request->idempotencyKey(),
+            $request->replayInput(),
+        );
 
         // After commit, and only identifiers and codes: no email, no IP, no
         // telemetry values (data-protection §5).

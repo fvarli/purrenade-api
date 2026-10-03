@@ -91,6 +91,14 @@ enum ProblemCode: string
     case IdempotencyKeyReused = 'idempotency_key_reused';
 
     /**
+     * The finish body exceeds its bounded size (256 KiB). The application
+     * answers this, not the proxy: the proxy's own ceiling sits above it so the
+     * contract response is always this one. A conforming client omits the
+     * optional replay log rather than send a body this large.
+     */
+    case PayloadTooLarge = 'payload_too_large';
+
+    /**
      * The HTTP status this condition always carries.
      *
      * 403 and not 404 for the admin cases: docs/security/authorization-and-roles.md
@@ -132,6 +140,8 @@ enum ProblemCode: string
             self::RateLimited,
             self::VerificationResendCooldown,
             self::DisplayNameChangeCooldown => Response::HTTP_TOO_MANY_REQUESTS,
+
+            self::PayloadTooLarge => Response::HTTP_REQUEST_ENTITY_TOO_LARGE,
 
             self::ServiceUnavailable => Response::HTTP_SERVICE_UNAVAILABLE,
             self::ServerError => Response::HTTP_INTERNAL_SERVER_ERROR,
@@ -187,6 +197,7 @@ enum ProblemCode: string
             self::DisplayNameChangeCooldown => 'Display name was changed too recently',
             self::RunNotActive => 'The run is no longer active',
             self::IdempotencyKeyReused => 'Idempotency key was reused with a different request',
+            self::PayloadTooLarge => 'Request body is too large',
         };
     }
 }
