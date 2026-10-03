@@ -53,8 +53,11 @@ Owner decisions O9 and the P3 §16.2 rows (2026-10-03); D2 (dedicated worker). D
 | --- | --- |
 | `ReplayRunEvidence(run_id)` | Deterministic replay of an accepted run's canonical input is CPU work of up to seconds. It establishes **post-acceptance evidence only** and never changes the run, so it is not transactional with acceptance — the line §3 draws |
 
-- **After commit.** Dispatched with an explicit `afterCommit()` from inside the
-  acceptance transaction; the connections default to `after_commit => false`.
+- **After commit.** Dispatched from a `DB::afterCommit()` callback registered
+  inside the acceptance transaction, so the whole dispatch — including the
+  `ShouldBeUnique` lock, a `cache_locks` write with the database cache store —
+  happens only once that transaction has committed, and a rollback discards it.
+  (A job-level `afterCommit()` would defer only the push, not the lock.)
 - **Its own queue and worker.** The `replay` queue is served only by
   `purrenade-replay-worker.service`; `purrenade-queue.service` keeps `default`
   (the transactional mail), so a replay can never delay an authentication or

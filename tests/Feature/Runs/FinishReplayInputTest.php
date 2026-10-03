@@ -9,6 +9,7 @@ use App\Services\Replay\ReplayInputStore;
 use App\Services\Runs\FinishFingerprint;
 use App\Services\Runs\RunTelemetry;
 use Carbon\CarbonImmutable;
+use Illuminate\Database\Events\QueryExecuted;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Queue;
@@ -229,6 +230,65 @@ it('dispatches nothing when the acceptance transaction rolls back', function ():
 
     expect(Run::query()->findOrFail($runId)->status->value)->toBe('active')
         ->and(replayWorkRow($runId))->toBeNull();
+    Queue::assertNothingPushed();
+});
+
+/**
+ * The writes of one finish that matter for the dispatch boundary, each with how
+ * deep in transactions it ran relative to the test's own: +1 is inside the
+ * acceptance transaction, 0 is after it committed.
+ *
+ * @return list<string>
+ */
+function recordDispatchBoundary(callable $finish): array
+{
+    $base = DB::transactionLevel();
+    $seen = [];
+
+    DB::listen(function (QueryExecuted $query) use (&$seen, $base): void {
+        if (preg_match('/^\s*(insert into "?cache_locks|insert into run_replay_inputs|update "runs")/i', $query->sql, $m) === 1) {
+            $seen[] = strtolower(str_replace('"', '', $m[1])).' @'.(DB::transactionLevel() - $base);
+        }
+    });
+
+    $finish();
+
+    return $seen;
+}
+
+it('takes the replay job\'s uniqueness lock only after the acceptance transaction commits (database cache store)', function (): void {
+    config(['cache.default' => 'database']);
+    $user = User::factory()->create();
+    $runId = startReplayRun($user);
+
+    $seen = recordDispatchBoundary(fn () => finishRun($user, $runId, [...plausibleTelemetry(), 'replay_input' => finishReplayStream()], (string) Str::uuid())->assertOk());
+
+    expect($seen)->toBe([
+        'update runs @1',
+        'insert into run_replay_inputs @1',
+        'insert into cache_locks @0',
+    ]);
+    expect(DB::table('cache_locks')->where('key', 'like', '%'.$runId)->count())->toBe(1);
+    Queue::assertPushedOn('replay', ReplayRunEvidence::class, fn (ReplayRunEvidence $job): bool => $job->runId === $runId);
+});
+
+it('writes no uniqueness lock and dispatches nothing when the acceptance rolls back (database cache store)', function (): void {
+    config(['cache.default' => 'database']);
+    $user = User::factory()->create();
+    $runId = startReplayRun($user);
+
+    DB::unprepared("
+        CREATE OR REPLACE FUNCTION purrenade_test_fail() RETURNS trigger AS \$\$
+        BEGIN RAISE EXCEPTION 'forced rollback'; END \$\$ LANGUAGE plpgsql;
+        CREATE TRIGGER purrenade_test_fail AFTER INSERT ON run_replay_inputs FOR EACH ROW EXECUTE FUNCTION purrenade_test_fail();
+    ");
+
+    $seen = recordDispatchBoundary(fn () => finishRun($user, $runId, [...plausibleTelemetry(), 'replay_input' => finishReplayStream()], (string) Str::uuid())->assertStatus(500));
+
+    expect($seen)->not->toContain('insert into cache_locks @0')
+        ->and($seen)->not->toContain('insert into cache_locks @1')
+        ->and(DB::table('cache_locks')->where('key', 'like', '%'.$runId)->exists())->toBeFalse()
+        ->and(Run::query()->findOrFail($runId)->status->value)->toBe('active');
     Queue::assertNothingPushed();
 });
 

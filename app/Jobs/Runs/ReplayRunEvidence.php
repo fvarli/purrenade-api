@@ -18,8 +18,10 @@ use Throwable;
  *
  * - **Payload:** the run id, and nothing else (queues §4). The input stays
  *   encrypted in `run_replay_inputs`; it never enters `jobs` or `failed_jobs`.
- * - **Dispatch:** only after the acceptance transaction commits (`afterCommit()`
- *   at the call site; the connections default to `after_commit => false`).
+ * - **Dispatch:** only after the acceptance transaction commits, from a
+ *   `DB::afterCommit()` callback at the call site — so the `ShouldBeUnique`
+ *   lock, taken when the dispatch is made, is never written inside that
+ *   transaction. A rollback discards the callback, and with it the dispatch.
  * - **Queue:** the dedicated `replay` queue, served by its own worker, so a
  *   replay can never delay an authentication or email job.
  * - **Retries:** class A (transient) rethrows, within `tries` and `backoff`;

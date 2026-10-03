@@ -128,3 +128,72 @@ it('never lets the input reach a log, the queue, a failure record, the response 
 it('keeps the input out of the model\'s serialised form', function (): void {
     expect((new RunReplayInput)->getHidden())->toBe(['input']);
 });
+
+/**
+ * Every captured record, with each logged exception spelled out: its class, its
+ * message, its trace, and every exception it chains — the places a database
+ * error carries its SQL bindings and PostgreSQL's row detail.
+ */
+function capturedLogTextWithExceptions(): string
+{
+    $text = '';
+
+    foreach (['privacy_capture', 'security'] as $channel) {
+        foreach (privacyLogHandler($channel)->getRecords() as $record) {
+            $text .= $record->message.json_encode($record->context).json_encode($record->extra)."\n";
+
+            for ($e = $record->context['exception'] ?? null; $e instanceof Throwable; $e = $e->getPrevious()) {
+                $text .= $e::class.': '.$e->getMessage()."\n".$e->getTraceAsString()."\n";
+            }
+        }
+    }
+
+    return $text;
+}
+
+it('keeps the input and its envelope out of every log when storing it fails, and fails the finish', function (): void {
+    $user = User::factory()->create();
+    $runId = startRun($user)->assertCreated()->json('data.run_id');
+    travel(31_000)->milliseconds();
+
+    // A database-side failure of exactly the encrypted INSERT, of the kind whose
+    // message carries the full row: a CHECK violation ("Failing row contains").
+    DB::statement('ALTER TABLE run_replay_inputs ADD CONSTRAINT purrenade_test_refuse_input CHECK (input IS NULL) NOT VALID');
+
+    $response = finishRun($user, $runId, [...plausibleTelemetry(), 'replay_input' => [
+        'format_version' => 1,
+        'domain_version' => '1',
+        'total_steps' => 3000,
+        'events' => [[1733, 1], [1201, 2]],
+    ]], (string) Str::uuid())->assertStatus(500);
+
+    // The finish failed as a whole: nothing of the acceptance survived.
+    expect(DB::table('runs')->where('id', $runId)->value('status'))->toBe('active')
+        ->and(DB::table('run_replay_inputs')->where('run_id', $runId)->exists())->toBeFalse()
+        ->and(DB::table('run_loli_evidence')->where('run_id', $runId)->exists())->toBeFalse()
+        ->and(DB::table('paw_ledger')->where('run_id', $runId)->exists())->toBeFalse()
+        ->and((int) DB::table('player_progression')->where('user_id', $user->id)->value('run_count'))->toBe(0)
+        ->and(DB::table('jobs')->count())->toBe(0);
+
+    $logs = capturedLogTextWithExceptions();
+    $body = (string) $response->getContent();
+
+    // The failure is reported — under a fixed code, not swallowed.
+    expect($logs)->toContain('replay_input_persistence_failed');
+
+    foreach (['the logs' => $logs, 'the finish response' => $body] as $where => $haystack) {
+        expectNoReplayMarker($haystack, $where);
+
+        foreach ([
+            '7b226976',               // hex of the envelope's `{"iv`
+            '\\x7b22',                // PostgreSQL's bytea rendering of it
+            'eyJpdiI6',               // base64 of `{"iv":`
+            '"iv"', '"mac"',          // the envelope's members
+            'decode(',                // the INSERT with its bindings interpolated
+            'Failing row contains',   // PostgreSQL's row detail
+            'QueryException',         // the database exception itself, chained or not
+        ] as $marker) {
+            expect(str_contains($haystack, $marker))->toBeFalse("'{$marker}' reached {$where}");
+        }
+    }
+});

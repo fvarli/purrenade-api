@@ -294,3 +294,65 @@ it('keeps a committed acceptance when the after-commit replay fails synchronousl
         ->and((int) DB::table('player_progression')->where('user_id', $user->id)->value('run_count'))->toBe(1)
         ->and(DB::table('paw_ledger')->where('run_id', $runId)->count())->toBe(1);
 });
+
+it('writes the replay job\'s uniqueness lock in a later transaction that already sees the run accepted (database cache store)', function (): void {
+    $user = User::factory()->create();
+    $runId = (string) Str::uuid7();
+    $started = now()->utc()->subSeconds(60)->format('Y-m-d H:i:s.v');
+    DB::table('runs')->insert([
+        'id' => $runId, 'user_id' => $user->id, 'status' => 'active', 'seed' => 42, 'start_loli_cycle_paws' => 0,
+        'character_id' => Character::query()->where('key', 'aysenur')->value('id'),
+        'started_at' => $started, 'created_at' => $started, 'updated_at' => $started,
+    ]);
+    $body = [...plausibleTelemetry(), 'replay_input' => ['format_version' => 1, 'domain_version' => '1', 'total_steps' => 100, 'events' => []]];
+    $headers = [...sessionFor($user), 'Idempotency-Key' => (string) Str::uuid()];
+
+    // Test-only witnesses: which database transaction wrote each row, and what
+    // the lock's writer could see of the run at that moment.
+    DB::unprepared("
+        CREATE TABLE purrenade_test_boundary (what text, txid bigint, run_status text);
+        CREATE OR REPLACE FUNCTION purrenade_test_witness_input() RETURNS trigger AS \$\$
+        BEGIN
+            INSERT INTO purrenade_test_boundary VALUES ('input', txid_current(), NULL);
+            RETURN NEW;
+        END \$\$ LANGUAGE plpgsql;
+        CREATE TRIGGER purrenade_test_witness_input AFTER INSERT ON run_replay_inputs
+            FOR EACH ROW EXECUTE FUNCTION purrenade_test_witness_input();
+        CREATE OR REPLACE FUNCTION purrenade_test_witness_lock() RETURNS trigger AS \$\$
+        BEGIN
+            INSERT INTO purrenade_test_boundary VALUES ('lock', txid_current(),
+                (SELECT status FROM runs WHERE id::text = substring(NEW.key FROM '[0-9a-f-]{36}\$')));
+            RETURN NEW;
+        END \$\$ LANGUAGE plpgsql;
+        CREATE TRIGGER purrenade_test_witness_lock AFTER INSERT ON cache_locks
+            FOR EACH ROW EXECUTE FUNCTION purrenade_test_witness_lock();
+    ");
+
+    try {
+        $env = ['QUEUE_CONNECTION' => 'database', 'CACHE_STORE' => 'database'];
+        $result = replayWorkers()->result(replayWorkers()->spawn('f', 'POST', "/api/v1/game-runs/{$runId}/finish", $headers, $body, null, $env));
+
+        expect($result['status'])->toBe(200)
+            ->and($result['body']['data']['status'])->toBe('accepted');
+
+        $input = DB::table('purrenade_test_boundary')->where('what', 'input')->sole();
+        $lock = DB::table('purrenade_test_boundary')->where('what', 'lock')->sole();
+
+        // A different, later transaction — and one in which the acceptance is
+        // already committed and visible. Then exactly one job, on `replay`.
+        expect((int) $lock->txid)->not->toBe((int) $input->txid)
+            ->and((int) $lock->txid)->toBeGreaterThan((int) $input->txid)
+            ->and($lock->run_status)->toBe('accepted')
+            ->and(DB::table('jobs')->where('queue', 'replay')->count())->toBe(1)
+            ->and(DB::table('jobs')->where('queue', '<>', 'replay')->count())->toBe(0);
+    } finally {
+        DB::unprepared('
+            DROP TRIGGER IF EXISTS purrenade_test_witness_lock ON cache_locks;
+            DROP TRIGGER IF EXISTS purrenade_test_witness_input ON run_replay_inputs;
+            DROP FUNCTION IF EXISTS purrenade_test_witness_lock();
+            DROP FUNCTION IF EXISTS purrenade_test_witness_input();
+            DROP TABLE IF EXISTS purrenade_test_boundary;
+        ');
+        DB::table('cache_locks')->delete();
+    }
+});

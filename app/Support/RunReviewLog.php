@@ -14,8 +14,9 @@ use Illuminate\Support\Facades\Log;
  * A review/security signal **only** (architecture §13). It changes no run
  * status, establishes no partial evidence and leaves Loli evidence untouched;
  * any action against the run is a later explicit, audited admin invalidation
- * (M13). It reuses the existing `security` channel — SL-3, SL-4 and ADR-0012
- * stay OPEN and are not decided here.
+ * (M13). It reuses the existing `security` channel. The security and audit
+ * logging policy (SL-3, SL-4) is governed separately, stays OPEN, and is not
+ * decided here.
  *
  * The field set is fixed and structurally free of gameplay data: the run, the
  * player, which accepted fields disagreed (codes, never values), and the

@@ -9,6 +9,7 @@ use App\Jobs\Runs\ReplayRunEvidence;
 use App\Models\Run;
 use Carbon\CarbonImmutable;
 use Illuminate\Contracts\Encryption\DecryptException;
+use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\DB;
 use JsonException;
@@ -67,7 +68,7 @@ final class ReplayInputStore
         $now = $receivedAt->utc()->format('Y-m-d H:i:s.v');
 
         if ($outcome instanceof ReplayOutcome || ! $candidate->input instanceof ReplayInput) {
-            DB::insert(
+            $this->insert(
                 "INSERT INTO run_replay_inputs (run_id, state, outcome_code, attempts, input, input_expires_at, created_at, updated_at)
                  VALUES (?, 'terminal', ?, 0, NULL, NULL, ?, ?)",
                 [$run->id, ($outcome ?? ReplayOutcome::InputMalformed)->value, $now, $now],
@@ -76,7 +77,7 @@ final class ReplayInputStore
             return;
         }
 
-        DB::insert(
+        $this->insert(
             "INSERT INTO run_replay_inputs (run_id, state, outcome_code, attempts, input, input_expires_at, created_at, updated_at)
              VALUES (?, 'pending', NULL, 0, decode(?, 'hex'), ?, ?, ?)",
             [
@@ -88,9 +89,37 @@ final class ReplayInputStore
             ],
         );
 
-        // After the acceptance transaction commits, never inside it: the
-        // queue connections default to `after_commit => false`.
-        ReplayRunEvidence::dispatch($run->id)->afterCommit();
+        // Dispatched from a callback that runs only once the acceptance
+        // transaction has committed — never inside it. `->afterCommit()` on
+        // the dispatch is not enough: `ShouldBeUnique` takes its lock when the
+        // dispatch is *made*, which with the database cache store is a
+        // `cache_locks` write inside this transaction. Here the whole dispatch,
+        // lock included, happens after the commit; a rollback discards it.
+        $runId = $run->id;
+
+        DB::afterCommit(static function () use ($runId): void {
+            ReplayRunEvidence::dispatch($runId);
+        });
+    }
+
+    /**
+     * One work-row INSERT, with its failure sanitised. The database exception
+     * is replaced, not chained: its message interpolates the bindings (the
+     * encrypted envelope) and PostgreSQL's detail repeats the row. The
+     * replacement still fails the finish, and the transaction rolls back.
+     *
+     * @param  list<mixed>  $bindings
+     */
+    private function insert(string $sql, #[\SensitiveParameter] array $bindings): void
+    {
+        try {
+            DB::insert($sql, $bindings);
+        } catch (QueryException $e) {
+            $sqlState = $e->getCode();
+            unset($e);
+
+            throw ReplayInputPersistenceFailed::withSqlState($sqlState);
+        }
     }
 
     /**

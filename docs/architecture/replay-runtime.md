@@ -209,12 +209,21 @@ the schema untouched. Neither ever touches a run.
   document, and the process's stdin, stdout or stderr. A CI scan forbids those names in logging
   calls, and `ReplayPrivacyTest` pushes a marked stream through the real path and searches every
   log, job payload, failure record, response and stored run for it.
+- **A failed store is sanitised.** If the work-row INSERT fails, the database exception — whose
+  message interpolates the bindings (the encrypted envelope) and repeats PostgreSQL's
+  `Failing row contains` detail — is replaced by `replay_input_persistence_failed (SQLSTATE …)`
+  and never chained. The finish still fails and its transaction rolls back; the run stays
+  active. **Boundary:** this governs what the *application* logs and answers. It cannot reach
+  PostgreSQL's own server log: with default settings a constraint violation is logged there
+  with its DETAIL row (PostgreSQL truncates each value, to 64 bytes, but the start of the
+  envelope can appear). Restricting that log is a database-host decision, outside this code.
 - **Operational:** `run.replay.completed` carries `{run_id, outcome, reason?, attempts,
   replay_ms?, stderr_present?, correlation_id}`. Also `run.replay.loli_divergence`, and
   `run.replay.swept` with counts only.
 - **Review signal:** `run.replay_inconsistent` on the `security` channel, with
   `{event, run_id, user_id, reasons ⊂ {score, run_paws, duration}, correlation_id}`. It never
-  carries values. It changes no status. SL-3, SL-4 and ADR-0012 stay OPEN.
+  carries values. It changes no status. The security and audit logging policy (SL-3, SL-4) is
+  governed separately and stays OPEN.
 
 ## 9. Obligations left to later phases
 
