@@ -153,6 +153,17 @@ jobs:
         env:
           DB_PASSWORD: ci-only-not-a-secret
 
+      - name: Pre-deploy dumps exclude replay input data
+        run: tests/deploy/backup-exclusion.test.sh
+        env:
+          # ANTI-6 O3: the backup helper's exact pg_dump exclusion, proven
+          # against this runner's real PostgreSQL in a scratch schema.
+          PGHOST: 127.0.0.1
+          PGPORT: '5432'
+          PGUSER: purrenade
+          PGDATABASE: purrenade
+          PGPASSWORD: ci-only-not-a-secret
+
       - name: Authentication secrets and replay input are never logged
         run: |
           set -euo pipefail

@@ -35,11 +35,15 @@ final class RunWorkers
     /**
      * @param  array<string, string>  $headers
      * @param  array<string, mixed>|null  $body
+     * @param  array<string, mixed>|null  $replay  Instead of an HTTP request: process one
+     *                                             pending replay (`run_id`, fake `answer`), or
+     *                                             run the sweeper (`sweep: true`).
+     * @param  array<string, string>  $env  Overrides for the worker's environment.
      * @return array{process: resource, pipes: array<int, resource>, tag: string}
      */
-    public function spawn(string $tag, string $method, string $uri, array $headers, ?array $body): array
+    public function spawn(string $tag, string $method, string $uri, array $headers, ?array $body, ?array $replay = null, array $env = []): array
     {
-        $spec = json_encode(compact('tag', 'method', 'uri', 'headers', 'body'), JSON_THROW_ON_ERROR);
+        $spec = json_encode(compact('tag', 'method', 'uri', 'headers', 'body', 'replay'), JSON_THROW_ON_ERROR);
 
         $env = [
             ...getenv(),
@@ -52,6 +56,7 @@ final class RunWorkers
             'QUEUE_CONNECTION' => 'sync',
             'MAIL_MAILER' => 'array',
             'BCRYPT_ROUNDS' => '4',
+            ...$env,
         ];
 
         $process = proc_open(

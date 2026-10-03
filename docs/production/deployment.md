@@ -48,14 +48,23 @@ Every PHP invocation names the runtime explicitly. See
 8.4, and assuming otherwise runs the application on the wrong runtime.
 
 ```bash
-# 1. The exact reviewed revision
+# 0. The ANTI-6 replay gate, BEFORE the checkout moves (ci-cd.md §6A):
+#    extract the target revision's gate and pins, and run it
 git fetch origin
+gate="$(mktemp -d)"; git archive <release-sha> deploy resources/replay | tar -x -C "$gate"
+bash "$gate/deploy/bin/replay-gate.sh" --tree "$gate" --env .env \
+    --backup-helper /usr/local/sbin/purrenade-backup      # must print "replay gate passed"
+
+# 1. The exact reviewed revision
 git checkout <release-sha>
 git status --porcelain        # must be empty
 
 # 2. Dependencies, production shape
 /usr/bin/php8.4 /usr/local/bin/composer install \
     --no-dev --prefer-dist --no-interaction --no-progress --optimize-autoloader
+
+# 2b. The replay runtime, through the application's own code path
+/usr/bin/php8.4 artisan replay:preflight     # must print "replay preflight passed"
 ```
 
 `--no-dev` matters: Pint, PHPStan, Pest and Faker have no business on a
@@ -81,6 +90,7 @@ a seeder in production** — see [§4](#4-what-is-forbidden-in-production).
 # 6. Pick up the new code and configuration
 sudo systemctl reload php8.4-fpm
 sudo systemctl restart purrenade-queue.service
+sudo systemctl restart purrenade-replay-worker.service
 ```
 
 **`config:cache` stops `.env` being read at all.** Every `env()` call outside
@@ -89,7 +99,7 @@ only inside `config/`, and why the cache must be rebuilt after any environment
 change, not just after a code change. CI proves both caches build and clear
 cleanly on every commit.
 
-The queue worker must be **restarted, not reloaded**: a long-lived worker holds
+Both queue workers must be **restarted, not reloaded**: a long-lived worker holds
 the old code in memory and would keep running it. The unit's `--max-time=3600`
 means it would eventually cycle on its own, but "eventually" is not a deployment
 step.
@@ -172,10 +182,13 @@ Everything below was already true of the manual process and is now enforced by
 - A reviewed, exact, pushed revision
 - Explicit **PHP 8.4** for every invocation — never bare `php`
 - A production Composer install: `--no-dev`, from the lockfile, optimized autoloader
-- A **pre-migration PostgreSQL backup**, verified to exist before migrating
+- The ANTI-6 **replay gate before the checkout** and `replay:preflight` before
+  the backup — both hard gates (ci-cd.md §6A)
+- A **pre-migration PostgreSQL backup**, verified to exist before migrating, and
+  carrying no `run_replay_inputs` data
 - Guarded production migrations — `--force --no-interaction`, never a seeder
 - A config, route and event cache rebuild after code or environment changes
-- A PHP-FPM reload and a queue worker **restart**
+- A PHP-FPM reload and a **restart** of both queue workers
 - An application health check, then a public smoke test
 - Safe failure behaviour: a failed step stops the deployment rather than
   continuing to the next one

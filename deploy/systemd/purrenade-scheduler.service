@@ -1,0 +1,32 @@
+# Purrenade API scheduler run — PRODUCTION system unit TEMPLATE (OB-6).
+#
+# One `php artisan schedule:run`, started every minute by
+# purrenade-scheduler.timer (ANTI-6 O8, owner decision 2026-10-03). The schedule
+# itself lives in routes/console.php, and its only entry is the ANTI-6
+# replay-input sweeper (`replay:sweep`): nothing else is scheduled merely because
+# a scheduler now exists.
+#
+# The sweeper is what bounds replay input physically without relying on
+# traffic: expired input is cleared within about a minute of its 24-hour
+# logical expiry while this timer runs.
+#
+#   @DEPLOY_USER@   the dedicated unprivileged deployment account
+#   @API_ROOT@      the API deployment directory
+#   @PHP_BIN@       the absolute path to PHP 8.4
+
+[Unit]
+Description=Purrenade API scheduler (schedule:run)
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=oneshot
+User=@DEPLOY_USER@
+Group=www-data
+WorkingDirectory=@API_ROOT@
+ExecStart=@PHP_BIN@ artisan schedule:run --no-interaction
+SyslogIdentifier=purrenade-scheduler
+PrivateTmp=true
+
+# A run that hangs must not block the next minute's run forever.
+TimeoutStartSec=55

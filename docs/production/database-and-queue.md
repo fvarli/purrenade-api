@@ -62,12 +62,27 @@ directory. Let `postgres` write to stdout and let the privileged shell perform
 the redirect:
 
 ```bash
-sudo -u postgres pg_dump --format=custom <database-name> \
+sudo -u postgres pg_dump --format=custom --exclude-table-data='*.run_replay_inputs' <database-name> \
   | sudo tee <backup-dir>/pre-migration-$(date -u +%Y%m%dT%H%M%SZ).dump >/dev/null
 ```
 
 The `postgres` user produces the bytes; root places them. Neither needs a
 permission it should not have.
+
+**`--exclude-table-data='*.run_replay_inputs'` is mandatory (ANTI-6 O3).** That
+table holds transient, encrypted replay input with a 24-hour ceiling; a dump
+must never extend its lifetime. The table's *definition* is still dumped, so a
+restore is complete — the table simply comes back empty, and any replay that was
+pending ends with ABSENT evidence (never a rejected run). A pattern that matches
+no table is not an error, so the flag is safe before the table exists. The
+privileged helper (`deploy/privileged/purrenade-backup`) uses exactly this flag
+and refuses an archive whose listing shows the table's data; check a manual dump
+the same way:
+
+```bash
+sudo pg_restore --list <backup-dir>/<file>.dump | grep -E 'TABLE DATA [^ ]+ run_replay_inputs ' \
+  && echo 'REFUSE: replay input data is in this dump'
+```
 
 `--format=custom` rather than plain SQL, because a custom-format dump can be
 restored selectively and validated without being executed:
@@ -87,9 +102,11 @@ backup's name is historical evidence, not a value to hardcode into a script.
 
 Restoration is deliberate, planned and explicitly authorised. It loses
 everything written since the backup, so it is the last option, not the first.
-Confirm the archive with `pg_restore --list`, stop the queue worker so no job
-writes during the restore, restore, then rebuild caches and re-verify health and
-the full sign-in lifecycle.
+Confirm the archive with `pg_restore --list`, stop **both** queue workers
+(`purrenade-queue.service`, `purrenade-replay-worker.service`) and the scheduler
+timer so no job writes during the restore, restore, then rebuild caches and
+re-verify health and the full sign-in lifecycle. `run_replay_inputs` comes back
+empty by design (§2).
 
 ## 3. Migrations
 
@@ -129,11 +146,58 @@ sudo systemctl restart purrenade-queue.service
 sudo journalctl -u purrenade-queue.service -f
 ```
 
+### The replay worker (ANTI-6 P3)
+
+**Installed by the P3 bootstrap** ([ci-cd.md §6A](ci-cd.md)); until then it does not exist in
+production, and neither does the scheduler below.
+
+| | |
+| --- | --- |
+| Unit | `purrenade-replay-worker.service` — a **second** worker, the `replay` queue only |
+| Identity, runtime | as above: the deployment account, PHP 8.4 by absolute path |
+| Node | each job starts one short-lived **Node 24** process, found **only** through `REPLAY_NODE_BINARY` in `.env` (an absolute path; never `PATH`) |
+
+```
+queue:work database --queue=replay --sleep=3 --tries=3 --timeout=60 --max-time=3600 --memory=256
+```
+
+`purrenade-queue.service` above has no `--queue` option, so it serves `default`
+only and never runs a replay: replay CPU time can never sit in front of
+verification or reset mail. The replay worker is **not** load-bearing for any
+request — a stopped worker loses no run; pending inputs expire after 24 hours
+and that run's replay evidence is ABSENT. See
+[`../architecture/replay-runtime.md`](../architecture/replay-runtime.md).
+
+```bash
+sudo systemctl status  purrenade-replay-worker.service
+sudo journalctl -u purrenade-replay-worker.service -f
+```
+
+```sql
+SELECT count(*) FROM jobs WHERE queue = 'replay';                       -- should drain
+SELECT outcome_code, count(*) FROM run_replay_inputs GROUP BY 1;        -- outcomes, never the input
+SELECT count(*) FROM run_replay_inputs WHERE state = 'pending'
+   AND input_expires_at < now();                                        -- should be 0 while the timer runs
+```
+
+### The scheduler (OB-6, ANTI-6 O8)
+
+`purrenade-scheduler.timer` starts `purrenade-scheduler.service` — one
+`artisan schedule:run` — every minute. The schedule's only entry is
+`replay:sweep`, which clears expired replay input and re-dispatches orphaned
+replays.
+
+```bash
+systemctl list-timers purrenade-scheduler.timer
+sudo journalctl -u purrenade-scheduler.service --since '-10 min'
+```
+
 ### What is queued, and why it matters
 
-Only transactional mail: `VerifyEmailNotification` and
+On the `default` queue, only transactional mail: `VerifyEmailNotification` and
 `ResetPasswordNotification`, both `ShouldQueue` and both dispatched
-`afterCommit` so a code for a row a rollback removes is never sent.
+`afterCommit` so a code for a row a rollback removes is never sent. On the
+`replay` queue, only `ReplayRunEvidence` (above).
 
 This makes the worker **load-bearing for registration.** With
 `QUEUE_CONNECTION=database` and no worker running, verification codes are

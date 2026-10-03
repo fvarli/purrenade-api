@@ -92,8 +92,16 @@ fi
 # Already root, so `runuser` rather than another sudo hop. pg_dump writes to
 # stdout and this process performs the redirect: the postgres account never
 # needs to traverse a root-restricted directory, and never chooses a path.
+#
+# `run_replay_inputs` DATA is excluded (ANTI-6 O3): its rows are transient,
+# encrypted replay input with a 24-hour ceiling, and a dump must never extend
+# that lifetime. The table's definition is still dumped, so a restore is
+# complete and simply has no pending replays (their evidence ends ABSENT).
+# The schema wildcard matches the table in any schema; a pattern that matches
+# nothing is not an error, so a dump taken before the table exists is unchanged.
+readonly EXCLUDED_DATA='*.run_replay_inputs'
 umask 077
-if ! runuser -u postgres -- pg_dump --format=custom "$database" > "$target"; then
+if ! runuser -u postgres -- pg_dump --format=custom --exclude-table-data="$EXCLUDED_DATA" "$database" > "$target"; then
     rm -f "$target"
     die "pg_dump failed; no backup was produced"
 fi
@@ -102,8 +110,14 @@ fi
 
 # A backup that has not been listed is not a backup. This is the cheapest proof
 # that the file is a readable archive rather than a truncated transfer.
-if ! pg_restore --list "$target" >/dev/null 2>&1; then
+if ! listing="$(pg_restore --list "$target" 2>/dev/null)"; then
     die "backup is not a readable archive: ${target} — do NOT migrate"
+fi
+
+# And the exclusion actually held: no data entry for the transient table.
+if printf '%s\n' "$listing" | grep -qE 'TABLE DATA [^ ]+ run_replay_inputs '; then
+    rm -f "$target"
+    die "backup contains run_replay_inputs data; refusing it — do NOT migrate"
 fi
 
 chmod 600 "$target"

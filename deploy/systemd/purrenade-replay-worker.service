@@ -1,0 +1,69 @@
+# Purrenade API ANTI-6 replay worker — PRODUCTION system unit TEMPLATE.
+#
+# A second, dedicated worker for the `replay` queue only (owner decision D2,
+# 2026-10-03). The existing purrenade-queue.service keeps serving the `default`
+# queue — verification and reset mail — and never picks up a replay, so replay
+# CPU time can never sit in front of an authentication or email job.
+#
+# Each replay job starts one short-lived Node 24 process (the pinned bundle in
+# resources/replay/), with an empty environment and a hard 15 s kill. Node is
+# found ONLY through REPLAY_NODE_BINARY in the application's .env, an absolute
+# path; never through PATH. See docs/architecture/replay-runtime.md.
+#
+# Replay is post-acceptance evidence only. A stopped worker loses no run and
+# rejects nothing: pending inputs expire after 24 hours and their evidence is
+# ABSENT. Still supervised, because evidence lost is credit lost (AU-9).
+#
+# New in ANTI-6 P3, so unlike purrenade-queue.service there is no live unit to
+# reconcile: bootstrap renders and installs this one (docs/production/ci-cd.md
+# §6), and the deploy gate refuses to deploy until it is enabled.
+#
+#   @DEPLOY_USER@   the dedicated unprivileged deployment account
+#   @API_ROOT@      the API deployment directory
+#   @PHP_BIN@       the absolute path to PHP 8.4
+
+[Unit]
+Description=Purrenade API replay worker (ANTI-6)
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=@DEPLOY_USER@
+Group=www-data
+WorkingDirectory=@API_ROOT@
+
+# --queue=replay: this queue and nothing else.
+# --timeout=60 matches the job's own timeout, below the connection's
+# retry_after (90 s), so a job is never redelivered while still running.
+# --memory=256 recycles the worker if a PHP process grows; each Node process is
+# separately capped by --max-old-space-size.
+ExecStart=@PHP_BIN@ artisan queue:work database \
+    --queue=replay \
+    --sleep=3 \
+    --tries=3 \
+    --timeout=60 \
+    --max-time=3600 \
+    --memory=256
+
+Restart=always
+RestartSec=5
+SyslogIdentifier=purrenade-replay
+
+PrivateTmp=true
+KillMode=mixed
+TimeoutStopSec=30
+
+# ---------------------------------------------------------------------------
+# PROPOSED — NOT VERIFIED AGAINST PRODUCTION. Deliberately left commented out,
+# as in purrenade-queue.service. Note especially: ProtectHome=true hides /home,
+# and would break replay if the pinned Node installation lives under a home
+# directory. Enable one at a time, observed, after confirming the Node path.
+# ---------------------------------------------------------------------------
+#
+# ProtectSystem=full
+# ProtectHome=true
+# NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

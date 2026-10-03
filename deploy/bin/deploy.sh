@@ -17,6 +17,9 @@
 # is not an actionable sentence when a schema migration is involved.
 #
 #   PREFLIGHT  nothing has changed. Retry freely.
+#   REPLAY_PREFLIGHT  nothing has changed (Git objects were fetched; the
+#              working tree did not move). The ANTI-6 hard gate: fix the host
+#              bootstrap it names, then retry.
 #   CHECKOUT   the working tree moved; no dependency or schema change yet.
 #   DEPENDENCIES  code and vendor/ may disagree with the running FPM workers
 #                 until a reload. Re-run, or check out the previous revision.
@@ -51,6 +54,7 @@ on_failure() {
     printf '\n  DEPLOYMENT FAILED at boundary: %s\n' "$BOUNDARY" >&2
     case "$BOUNDARY" in
         PREFLIGHT)    printf '  Nothing was changed. Safe to retry.\n\n' >&2 ;;
+        REPLAY_PREFLIGHT) printf '  Nothing was changed; the checkout did not move.\n  Complete the replay bootstrap (docs/production/ci-cd.md §6), then retry.\n\n' >&2 ;;
         CHECKOUT)     printf '  The checkout moved; no dependencies or schema changed.\n\n' >&2 ;;
         DEPENDENCIES) printf '  Code and vendor/ may disagree. Re-run, or restore the previous revision.\n\n' >&2 ;;
         BACKUP)       printf '  Stopped BEFORE migrating. The schema is untouched.\n\n' >&2 ;;
@@ -124,11 +128,6 @@ info "root:      $root"
 info "php:       $php_bin"
 [[ "$dry_run" -eq 1 ]] && info "MODE:      dry run — nothing will be changed"
 
-# ---------------------------------------------------------------------------
-phase "CHECKOUT"
-# ---------------------------------------------------------------------------
-BOUNDARY='CHECKOUT'
-
 run() {
     if [[ "$dry_run" -eq 1 ]]; then
         printf '  DRY RUN: %s\n' "$*"
@@ -137,6 +136,13 @@ run() {
     "$@"
 }
 
+# ---------------------------------------------------------------------------
+phase "REPLAY PREFLIGHT"
+# ---------------------------------------------------------------------------
+BOUNDARY='REPLAY_PREFLIGHT'
+
+# Fetching adds Git objects only; the working tree, and so what PHP-FPM serves,
+# does not move until CHECKOUT.
 run git -C "$root" fetch --quiet origin
 if [[ "$dry_run" -eq 0 ]]; then
     git -C "$root" cat-file -e "${sha}^{commit}" 2>/dev/null \
@@ -146,6 +152,32 @@ if [[ "$dry_run" -eq 0 ]]; then
     git -C "$root" merge-base --is-ancestor "$sha" origin/main \
         || die "revision is not reachable from origin/main: $sha"
 fi
+
+# The ANTI-6 hard gate (owner decision D3), BEFORE anything changes: the
+# target revision's own gate script and pinned bundles, extracted to a
+# temporary directory, verify the installed backup helper, the replay worker
+# and scheduler units, the pinned Node 24, the bundle pins and a golden
+# self-replay. See deploy/bin/replay-gate.sh.
+if [[ "$dry_run" -eq 1 ]]; then
+    info "DRY RUN: would verify the replay gate of $sha before checkout"
+else
+    gate_tree="$(mktemp -d)"
+    if ! git -C "$root" archive "$sha" deploy resources/replay | tar -x -C "$gate_tree"; then
+        rm -rf "$gate_tree"
+        die "could not extract the replay gate from revision $sha"
+    fi
+    bash "$gate_tree/deploy/bin/replay-gate.sh" \
+        --tree "$gate_tree" --env "$root/.env" --backup-helper "$backup_helper" \
+        || { rm -rf "$gate_tree"; die "the replay gate refused revision $sha"; }
+    rm -rf "$gate_tree"
+fi
+info "replay gate passed"
+
+# ---------------------------------------------------------------------------
+phase "CHECKOUT"
+# ---------------------------------------------------------------------------
+BOUNDARY='CHECKOUT'
+
 run git -C "$root" checkout --quiet --force "$sha"
 
 if [[ "$dry_run" -eq 0 ]]; then
@@ -164,6 +196,12 @@ BOUNDARY='DEPENDENCIES'
 run "$php_bin" "$composer_bin" install \
     --no-dev --prefer-dist --no-interaction --no-progress --optimize-autoloader
 info "production dependencies installed"
+
+# The same verification through the application's own code path — the one the
+# replay worker uses — before the backup and the migration. Nothing in the
+# schema has changed if it fails.
+run "$php_bin" "$root/artisan" replay:preflight
+info "replay runtime verified"
 
 # ---------------------------------------------------------------------------
 phase "BACKUP"
@@ -222,7 +260,7 @@ phase "SERVICES"
 # ---------------------------------------------------------------------------
 BOUNDARY='SERVICES'
 
-# Exactly two named units, each covered by the narrow sudoers contract in
+# Exactly three named units, each covered by the narrow sudoers contract in
 # docs/production/ci-cd.md. Nothing global is restarted: nginx serves unrelated
 # applications and is never touched here.
 #
@@ -231,7 +269,8 @@ BOUNDARY='SERVICES'
 # deployment step.
 run sudo -n systemctl reload php8.4-fpm
 run sudo -n systemctl restart purrenade-queue.service
-info "PHP-FPM reloaded, queue worker restarted"
+run sudo -n systemctl restart purrenade-replay-worker.service
+info "PHP-FPM reloaded, queue and replay workers restarted"
 
 # ---------------------------------------------------------------------------
 phase "HEALTH"

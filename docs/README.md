@@ -59,6 +59,7 @@ open parameters resolved. See
 | [observability.md](architecture/observability.md) | Correlation IDs, structured logs, no-PII rule |
 | [engineering-standards.md](architecture/engineering-standards.md) | **★** Per-milestone quality checklist |
 | [operations.md](architecture/operations.md) | **★** Establishing the first administrator, how everyone else gets an account, procedures deliberately absent |
+| [replay-runtime.md](architecture/replay-runtime.md) | **IMPLEMENTED (ANTI-6 P3).** Post-acceptance replay evidence: the pinned web bundle and its manifest, the Node 24 process contract, outcomes, the 24-hour input lifecycle, the measured size bounds, the replay worker, scheduler, dump exclusion and deploy gate |
 | [local-development.md](architecture/local-development.md) | **★** Local HTTPS, Mailpit email capture, ports, reverse-proxy trust, the two ways to run the API, and the endpoints it answers today |
 | [versions-and-runtime.md](architecture/versions-and-runtime.md) | Version research findings (not pins) |
 

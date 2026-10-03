@@ -72,6 +72,16 @@ depends on every developer remembering it is not a rule.
 | Job failures | |
 | Slow queries above a threshold | The leaderboard is the likely offender |
 
+**ANTI-6 replay (P3) — implemented; emitted in production once P3 is deployed.** Codes, identifiers and counts only; never the input, the
+replay document or the process's output ([`../security/data-protection.md`](../security/data-protection.md) §5):
+
+| Event | Channel | Why |
+| --- | --- | --- |
+| `run.replay.completed` `{run_id, outcome, reason?, attempts, replay_ms?, stderr_present?}` | application | The outcome distribution is the replay pipeline's health: a rise in `attempts_exhausted` or `version_unsupported` is an operational fault, never a player's |
+| `run.replay_inconsistent` `{run_id, user_id, reasons, correlation_id}` | `security` | The ANTI-6 review signal. It changes no run status; any consequence is a later audited M13 action |
+| `run.replay.loli_divergence` `{run_id}` | application | The replay disagrees with the frozen P1 Loli derivation — a canary for the I-LOLI invariant, never a correction |
+| `run.replay.swept` `{expired, redispatched}` | application | The every-minute sweeper (`replay:sweep`, driven by `schedule:run` — the production scheduler built in P3, ANTI-6 O8) |
+
 ---
 
 ## 5. Metrics — PROPOSED

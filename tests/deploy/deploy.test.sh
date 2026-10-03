@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
-# Tests for deploy/bin/deploy.sh and deploy/bin/backup.sh.
+# Tests for deploy/bin/deploy.sh, deploy/bin/replay-gate.sh and the privileged
+# backup helper.
 #
 #   tests/deploy/deploy.test.sh
 #
@@ -17,6 +18,7 @@ set -uo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 DEPLOY="$ROOT_DIR/deploy/bin/deploy.sh"
 HELPER="$ROOT_DIR/deploy/privileged/purrenade-backup"
+GATE="$ROOT_DIR/deploy/bin/replay-gate.sh"
 DOCS="$ROOT_DIR/docs/production/ci-cd.md"
 
 PASS=0
@@ -121,6 +123,23 @@ t_dry_run_is_inert_and_ordered() {
     else
         fail "the backup phase runs before the migration phase" "backup=$backup_line migrate=$migrate_line"
     fi
+
+    # The ANTI-6 hard gate comes before anything moves, and the application's
+    # own preflight before the backup.
+    local gate_line checkout_line preflight_line
+    gate_line="$(printf '%s\n' "$out" | grep -n '==> REPLAY PREFLIGHT' | cut -d: -f1)"
+    checkout_line="$(printf '%s\n' "$out" | grep -n '==> CHECKOUT' | cut -d: -f1)"
+    preflight_line="$(printf '%s\n' "$out" | grep -n 'artisan replay:preflight' | cut -d: -f1)"
+    if [[ -n "$gate_line" && -n "$checkout_line" && "$gate_line" -lt "$checkout_line" ]]; then
+        pass "the replay gate runs before the checkout"
+    else
+        fail "the replay gate runs before the checkout" "gate=$gate_line checkout=$checkout_line"
+    fi
+    if [[ -n "$preflight_line" && -n "$backup_line" && "$preflight_line" -lt "$backup_line" ]]; then
+        pass "the replay preflight runs before the backup"
+    else
+        fail "the replay preflight runs before the backup" "preflight=$preflight_line backup=$backup_line"
+    fi
     rm -rf "$root"
 }
 
@@ -158,14 +177,15 @@ t_repository_commands_run_from_validated_root() {
     printf '# composer fixture\n' > "$composer"
     chmod +x "$php"
 
-    printf '%s\n' '#!/usr/bin/env bash' 'case "$1" in -C) shift 2;; esac' 'operation="$1"' 'printf "git:%s:%s\n" "$operation" "$PWD" >> "$DEPLOY_CWD_LOG"' 'case "$operation" in' '    fetch) [[ "$2" == "--quiet" && "$3" == "origin" ]];;' '    cat-file) [[ "$2" == "-e" && "$3" == "${DEPLOY_TEST_SHA}^{commit}" ]];;' '    merge-base) [[ "$2" == "--is-ancestor" && "$3" == "$DEPLOY_TEST_SHA" && "$4" == "origin/main" ]];;' '    checkout) [[ "$2" == "--quiet" && "$3" == "--force" && "$4" == "$DEPLOY_TEST_SHA" ]];;' '    status) [[ "$2" == "--porcelain" ]];;' '    *) exit 1;;' 'esac' > "$work/bin/git"
+    printf '%s\n' '#!/usr/bin/env bash' 'case "$1" in -C) shift 2;; esac' 'operation="$1"' 'printf "git:%s:%s\n" "$operation" "$PWD" >> "$DEPLOY_CWD_LOG"' 'case "$operation" in' '    fetch) [[ "$2" == "--quiet" && "$3" == "origin" ]];;' '    cat-file) [[ "$2" == "-e" && "$3" == "${DEPLOY_TEST_SHA}^{commit}" ]];;' '    merge-base) [[ "$2" == "--is-ancestor" && "$3" == "$DEPLOY_TEST_SHA" && "$4" == "origin/main" ]];;' '    archive) [[ "$2" == "$DEPLOY_TEST_SHA" && "$3" == "deploy" && "$4" == "resources/replay" ]] && cat "$DEPLOY_TEST_GATE_TAR";;' '    checkout) [[ "$2" == "--quiet" && "$3" == "--force" && "$4" == "$DEPLOY_TEST_SHA" ]];;' '    status) [[ "$2" == "--porcelain" ]];;' '    *) exit 1;;' 'esac' > "$work/bin/git"
     printf '%s\n' '#!/usr/bin/env bash' 'printf "sudo:%s\n" "$PWD" >> "$DEPLOY_CWD_LOG"' 'printf "/verified/backup.dump\n"' > "$work/bin/sudo"
     printf '%s\n' '#!/usr/bin/env bash' 'printf "curl:%s\n" "$PWD" >> "$DEPLOY_CWD_LOG"' > "$work/bin/curl"
     chmod +x "$work/bin/git" "$work/bin/sudo" "$work/bin/curl"
+    make_gate_tar "$work" 0
 
     (
         cd "$caller"
-        HOME="$caller" PATH="$work/bin:$PATH" DEPLOY_CWD_LOG="$log" DEPLOY_TEST_SHA="$SHA" \
+        HOME="$caller" PATH="$work/bin:$PATH" DEPLOY_CWD_LOG="$log" DEPLOY_TEST_SHA="$SHA" DEPLOY_TEST_GATE_TAR="$work/gate.tar" \
             "$DEPLOY" --root "$fixture" --sha "$SHA" --php "$php" \
             --composer "$composer" --backup-helper "$work/backup helper" \
             --health-url https://health.test >/dev/null
@@ -180,13 +200,20 @@ t_repository_commands_run_from_validated_root() {
     local expected_record records_ok=1
     for expected_record in \
         "git:fetch:$expected" "git:cat-file:$expected" \
-        "git:merge-base:$expected" "git:checkout:$expected" "git:status:$expected" \
-        "php:install:$expected" "php:migrate:$expected" \
+        "git:merge-base:$expected" "git:archive:$expected" "gate:$expected" \
+        "git:checkout:$expected" "git:status:$expected" \
+        "php:install:$expected" "php:replay:preflight:$expected" "php:migrate:$expected" \
         "php:config:cache:$expected" "php:route:cache:$expected" \
         "php:event:cache:$expected" "sudo:$expected" "curl:$expected"; do
         grep -qxF -- "$expected_record" "$log" || records_ok=0
     done
-    [[ "$(grep -cxF -- "sudo:$expected" "$log")" -eq 3 ]] || records_ok=0
+    [[ "$(grep -cxF -- "sudo:$expected" "$log")" -eq 4 ]] || records_ok=0
+
+    # The gate ran before the working tree moved.
+    local gate_at checkout_at
+    gate_at="$(grep -nxF -- "gate:$expected" "$log" | cut -d: -f1)"
+    checkout_at="$(grep -nxF -- "git:checkout:$expected" "$log" | cut -d: -f1)"
+    [[ -n "$gate_at" && -n "$checkout_at" && "$gate_at" -lt "$checkout_at" ]] || records_ok=0
 
     if [[ $rc -eq 0 && -s "$log" && $bad_cwd -eq 0 && $records_ok -eq 1 ]]; then
         pass "repository deployment commands use --root from another cwd and HOME"
@@ -215,6 +242,112 @@ t_reports_failure_boundary() {
         && pass "a failure names the boundary it stopped at" \
         || fail "a failure names the boundary it stopped at" "no boundary in output"
     rm -rf "$d"
+}
+
+# --- the ANTI-6 replay gate ----------------------------------------------------
+
+# A target-revision archive whose replay-gate.sh is a stub that records its cwd
+# and exits with the given status.
+make_gate_tar() {
+    local work="$1" status="$2"
+    mkdir -p "$work/gate/deploy/bin" "$work/gate/resources/replay"
+    printf '%s\n' '#!/usr/bin/env bash' 'printf "gate:%s\n" "$PWD" >> "$DEPLOY_CWD_LOG"' "exit $status" > "$work/gate/deploy/bin/replay-gate.sh"
+    tar -C "$work/gate" -cf "$work/gate.tar" deploy resources
+}
+
+t_replay_gate_refusal_changes_nothing() {
+    local work fixture log php
+    work="$(mktemp -d)"; fixture="$work/root"; log="$work/log"
+    mkdir -p "$fixture/.git" "$work/bin"
+    printf '{}' > "$fixture/composer.json"; printf '#!/bin/sh\n' > "$fixture/artisan"
+    php="$work/php8.4"
+    printf '%s\n' '#!/usr/bin/env bash' 'if [[ "$1" == "-r" ]]; then printf 8.4; exit 0; fi' 'printf "php:%s\n" "${2##*/}" >> "$DEPLOY_CWD_LOG"' > "$php"; chmod +x "$php"
+    printf '%s\n' '#!/usr/bin/env bash' 'case "$1" in -C) shift 2;; esac' 'printf "git:%s\n" "$1" >> "$DEPLOY_CWD_LOG"' 'case "$1" in archive) cat "$DEPLOY_TEST_GATE_TAR";; checkout|status) exit 0;; *) exit 0;; esac' > "$work/bin/git"
+    printf '%s\n' '#!/usr/bin/env bash' 'printf "sudo\n" >> "$DEPLOY_CWD_LOG"' > "$work/bin/sudo"
+    chmod +x "$work/bin/git" "$work/bin/sudo"
+    printf '# composer fixture\n' > "$work/composer"
+    : > "$log"
+    make_gate_tar "$work" 1
+
+    local out rc
+    out="$(PATH="$work/bin:$PATH" DEPLOY_CWD_LOG="$log" DEPLOY_TEST_GATE_TAR="$work/gate.tar" \
+        "$DEPLOY" --root "$fixture" --sha "$SHA" --php "$php" --composer "$work/composer" 2>&1)"
+    rc=$?
+
+    if [[ $rc -ne 0 ]] && grep -qx 'gate:.*' "$log" && ! grep -qE '^(git:checkout|php:|sudo)' "$log" \
+        && printf '%s\n' "$out" | grep -q 'boundary: REPLAY_PREFLIGHT'; then
+        pass "a replay gate refusal stops the deploy before checkout, dependencies, backup or migration"
+    else
+        fail "a replay gate refusal stops the deploy before checkout, dependencies, backup or migration" "rc=$rc; $(tr '\n' ' ' < "$log")"
+    fi
+    rm -rf "$work"
+}
+
+t_restarts_the_replay_worker() {
+    code_of "$DEPLOY" | grep -qF 'sudo -n systemctl restart purrenade-replay-worker.service' \
+        && pass "the deploy restarts the dedicated replay worker" \
+        || fail "the deploy restarts the dedicated replay worker" "no restart line"
+}
+
+t_docs_cover_the_replay_worker_restart() {
+    grep -qE '^<deploy-user> ALL=\(root\) NOPASSWD: /usr/bin/systemctl restart purrenade-replay-worker.service$' "$DOCS" \
+        && pass "the sudoers contract names the replay worker restart" \
+        || fail "the sudoers contract names the replay worker restart" "rule missing from $DOCS"
+}
+
+t_helper_excludes_replay_input_data() {
+    code_of "$HELPER" | grep -qF -- 'pg_dump --format=custom --exclude-table-data="$EXCLUDED_DATA"' \
+        && grep -qF "readonly EXCLUDED_DATA='*.run_replay_inputs'" "$HELPER" \
+        && pass "the helper's dump excludes run_replay_inputs data" \
+        || fail "the helper's dump excludes run_replay_inputs data" "flag missing"
+}
+
+# The real gate script, against this repository's own tree and pinned bundles.
+# Needs a Node 24 at REPLAY_NODE_BINARY (or the local nvm install); without one
+# the positive case is reported as a failure, never skipped.
+gate_fixture() {
+    local work="$1" node="$2"
+    mkdir -p "$work/bin"
+    printf '%s\n' '#!/usr/bin/env bash' '[[ "$1" == "is-enabled" ]] && { printf "%s\n" "${GATE_UNITS_STATE:-enabled}"; exit 0; }' 'exit 1' > "$work/bin/systemctl"
+    chmod +x "$work/bin/systemctl"
+    printf 'APP_ENV=production\nREPLAY_NODE_BINARY=%s\n' "$node" > "$work/env"
+    cp "$HELPER" "$work/helper"
+}
+
+t_replay_gate_script() {
+    local node="${REPLAY_NODE_BINARY:-$HOME/.nvm/versions/node/v24.21.0/bin/node}"
+    local work; work="$(mktemp -d)"
+    gate_fixture "$work" "$node"
+
+    PATH="$work/bin:$PATH" bash "$GATE" --tree "$ROOT_DIR" --env "$work/env" --backup-helper "$work/helper" >/dev/null 2>&1 \
+        && pass "the replay gate passes for the reviewed helper, enabled units, Node 24 and intact pins" \
+        || fail "the replay gate passes for the reviewed helper, enabled units, Node 24 and intact pins" "node=$node"
+
+    printf '# drift\n' >> "$work/helper"
+    PATH="$work/bin:$PATH" bash "$GATE" --tree "$ROOT_DIR" --env "$work/env" --backup-helper "$work/helper" >/dev/null 2>&1 \
+        && fail "the replay gate refuses an installed helper that differs from the template" "accepted" \
+        || pass "the replay gate refuses an installed helper that differs from the template"
+    cp "$HELPER" "$work/helper"
+
+    GATE_UNITS_STATE=disabled PATH="$work/bin:$PATH" bash "$GATE" --tree "$ROOT_DIR" --env "$work/env" --backup-helper "$work/helper" >/dev/null 2>&1 \
+        && fail "the replay gate refuses when the replay worker or timer is not enabled" "accepted" \
+        || pass "the replay gate refuses when the replay worker or timer is not enabled"
+
+    printf 'REPLAY_NODE_BINARY=node\n' > "$work/env"
+    PATH="$work/bin:$PATH" bash "$GATE" --tree "$ROOT_DIR" --env "$work/env" --backup-helper "$work/helper" >/dev/null 2>&1 \
+        && fail "the replay gate refuses a Node that is not an absolute path" "accepted" \
+        || pass "the replay gate refuses a Node that is not an absolute path"
+
+    # A tampered bundle copy fails its pin.
+    local tree="$work/tree"
+    mkdir -p "$tree"
+    cp -r "$ROOT_DIR/deploy" "$ROOT_DIR/resources" "$tree/"
+    printf '\n// tampered\n' >> "$tree/resources/replay/domain-1/purrenade-replay.mjs"
+    gate_fixture "$work" "$node"
+    PATH="$work/bin:$PATH" bash "$GATE" --tree "$tree" --env "$work/env" --backup-helper "$work/helper" >/dev/null 2>&1 \
+        && fail "the replay gate refuses a bundle that does not match its pin" "accepted" \
+        || pass "the replay gate refuses a bundle that does not match its pin"
+    rm -rf "$work"
 }
 
 # --- backup.sh ---------------------------------------------------------------
@@ -339,6 +472,11 @@ t_docs_have_no_wildcard_sudo_rule
 t_docs_sudo_rule_is_outside_the_repository_checkout
 t_docs_sudo_rules_preserve_no_environment
 t_every_sudo_is_noninteractive
+t_replay_gate_refusal_changes_nothing
+t_restarts_the_replay_worker
+t_docs_cover_the_replay_worker_restart
+t_helper_excludes_replay_input_data
+t_replay_gate_script
 
 printf '\n  %d passed, %d failed\n\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]

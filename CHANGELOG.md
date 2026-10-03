@@ -6,6 +6,32 @@ This project does not yet have released versions.
 
 ## [Unreleased]
 
+### Added — ANTI-6 P3: post-acceptance replay evidence
+
+Layer 3 replay ships **only** as post-acceptance evidence (ADR-0006 Amendment A, ANTI-1): it
+never participates in, delays or changes run acceptance. See
+`docs/architecture/replay-runtime.md`.
+
+- **Contract (additive).** `POST /game-runs/{runId}/finish` accepts an optional
+  `replay_input` — the canonical `step()` stream — which never produces a `422`, never affects
+  classification or the response, and is outside the idempotency fingerprint. The finish body
+  is bounded at 256 KiB: **`413 payload_too_large`**, a new stable problem code. `RunResult` is
+  unchanged.
+- **Data.** `run_replay_inputs` (transient work, never evidence: the input `APP_KEY`-encrypted,
+  unusable 24 h after receipt, cleared at every terminal outcome, ≤ 190 358 bytes as measured)
+  and `run_replay_evidence` (insert-only; cone safe passes, near misses and SLAYYY activations,
+  all three or none). Both admit rows only for accepted runs.
+- **Pipeline.** `ReplayRunEvidence(run_id)`, dispatched after the acceptance commit to a
+  dedicated `replay` queue and worker; a one-shot Node 24 process runs the **pinned** web
+  bundle (`resources/replay/domain-1/`, SHA-256 manifest, refreshed only by `bin/replay-pin`
+  from a clean web commit) with an empty environment, a 15 s kill and a bounded answer. A
+  replay that does not reproduce the accepted score, paws and duration records
+  `replay_inconsistent` and a `security`-channel review signal — never a status change.
+- **Operations.** The first production scheduler (`schedule:run` every minute, OB-6) runs only
+  `replay:sweep`. Pre-deploy dumps exclude `run_replay_inputs` data. `deploy.sh` gains a hard
+  replay gate before the checkout and `replay:preflight` before the backup; the operator
+  bootstrap is `docs/production/ci-cd.md` §6A.
+
 ### Added — M10: weekly and all-time leaderboards
 
 Only accepted runs rank, the server computes every rank, and the player's own entry is always

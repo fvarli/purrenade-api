@@ -156,17 +156,19 @@ API deployment directory.
 
 ### The sudoers contract
 
-Three rules, each an exact command with no wildcard and no caller-supplied
+Four rules, each an exact command with no wildcard and no caller-supplied
 argument:
 
 ```
 # /etc/sudoers.d/purrenade-deploy   (operator installs this; CI/CD never writes it)
 <deploy-user> ALL=(root) NOPASSWD: /usr/bin/systemctl reload php8.4-fpm
 <deploy-user> ALL=(root) NOPASSWD: /usr/bin/systemctl restart purrenade-queue.service
+<deploy-user> ALL=(root) NOPASSWD: /usr/bin/systemctl restart purrenade-replay-worker.service
 <deploy-user> ALL=(root) NOPASSWD: /usr/local/sbin/purrenade-backup
 ```
 
-That is the complete list — three operations, three rules.
+That is the complete list — four operations, four rules. The replay worker
+restart was added with ANTI-6 P3 (§6A).
 
 ### What this replaced, and why
 
@@ -196,6 +198,12 @@ arguments at all**. The database name and the backup directory come from
 account cannot write. The filename is generated inside the helper. It runs
 `pg_dump` through `runuser`, refuses an empty dump, proves the archive with
 `pg_restore --list`, and prints exactly one line: the path of a verified backup.
+
+Since ANTI-6 P3 it dumps with `--exclude-table-data='*.run_replay_inputs'` and
+refuses an archive whose listing shows that table's data: transient replay input
+must never outlive its 24-hour ceiling inside a backup (O3). The table's
+definition is kept, so a restore is complete. The deploy's replay gate refuses
+to deploy while the installed copy differs from the template by a single byte.
 
 The deployment account therefore receives the **outcome** of a backup and never
 the capability to take one against a target of its choosing.
@@ -251,6 +259,52 @@ helper, service units, or GitHub environment configuration changes.
 9. **Add the environment secrets and variables** in §7.
 10. **Deploy once by hand** following [deployment.md](deployment.md), to confirm
    the account and sudoers contract work before the pipeline depends on them.
+
+## 6A. ANTI-6 P3 bootstrap — before the first P3 deploy
+
+Every step is operator-run and privileged; the pipeline can do none of them. The
+deploy's **replay gate** (`deploy/bin/replay-gate.sh`, run before the checkout
+moves) verifies steps 1–4 and refuses the deployment, with nothing changed,
+until they are done. **All of them must be in place before P4 lets the web send
+replay input.**
+
+1. **Reinstall the backup helper** (O3). Copy
+   `deploy/privileged/purrenade-backup` over `/usr/local/sbin/purrenade-backup`,
+   `chown root:root`, `chmod 0755`, then verify as in §6 step 4. Confirm the
+   installed copy matches the template:
+   `sha256sum /usr/local/sbin/purrenade-backup deploy/privileged/purrenade-backup`.
+2. **Name the Node 24 executable** (O9). Add
+   `REPLAY_NODE_BINARY=<absolute path of the dedicated Node 24 installation>` to
+   the production `.env` — the installation the web service already runs on
+   (web `docs/production/README.md` §3), never a `PATH` lookup. Verify as the
+   deployment account: `sudo -u <deploy-user> <that path> --version` prints
+   `v24.…`. The deploy rebuilds `config:cache`, so the value is picked up.
+3. **Install the replay worker** (D2). Render
+   `deploy/systemd/purrenade-replay-worker.service` (`@DEPLOY_USER@`,
+   `@API_ROOT@`, `@PHP_BIN@`) to `/etc/systemd/system/`, `systemctl
+   daemon-reload`, `systemctl enable --now purrenade-replay-worker.service`. It
+   is new, so there is no live unit to reconcile. Leave its sandboxing commented
+   out; `ProtectHome=true` would hide a Node installed under `/home`.
+4. **Install the scheduler** (O8). Render `purrenade-scheduler.service` and
+   `purrenade-scheduler.timer` the same way, then `systemctl enable --now
+   purrenade-scheduler.timer`. Check with `systemctl list-timers
+   purrenade-scheduler.timer`.
+5. **Extend the sudoers contract** with the replay worker restart in §5.
+6. **Bound the request body at nginx, above the application** (D4). In the API
+   server block: `client_max_body_size 288k;`, then `nginx -t` and reload.
+   - The application's limit, 256 KiB on the finish route, is the
+     **authoritative** one and answers `413 payload_too_large` in the problem
+     envelope.
+   - nginx and Laravel count the same thing, the entity body, so nginx's ceiling
+     must sit strictly above 256 KiB or nginx would answer first with its own
+     non-canonical 413. 288k = 256 KiB + 32 KiB (12.5 %) leaves a clear band
+     that Laravel always answers, while nginx stops materially larger bodies
+     before PHP.
+   - This replaces the implicit 1 MiB default for the whole API server block.
+     No API route accepts a larger legitimate body: there are no uploads, and the
+     largest conforming body is the ~220 KB finish.
+
+Then deploy normally. The gate runs again on every deploy.
 
 ## 7. Environment configuration
 

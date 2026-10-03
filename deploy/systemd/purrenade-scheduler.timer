@@ -1,0 +1,19 @@
+# Purrenade API scheduler — PRODUCTION timer TEMPLATE (OB-6, ANTI-6 O8).
+#
+# Fires purrenade-scheduler.service at the start of every minute. Laravel's
+# `schedule:run` decides what is due; today that is only `replay:sweep`.
+#
+# Persistent=false: a missed minute is not replayed after downtime; the next
+# minute's sweep catches up on everything already expired.
+
+[Unit]
+Description=Purrenade API scheduler, every minute
+
+[Timer]
+OnCalendar=*-*-* *:*:00
+AccuracySec=1s
+Persistent=false
+Unit=purrenade-scheduler.service
+
+[Install]
+WantedBy=timers.target
