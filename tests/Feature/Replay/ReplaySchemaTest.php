@@ -148,7 +148,7 @@ it('rolls both migrations back and forward cleanly', function (): void {
 
     expect(Schema::hasTable('run_replay_inputs'))->toBeFalse()
         ->and(Schema::hasTable('run_replay_evidence'))->toBeFalse()
-        ->and(DB::scalar("SELECT count(*) FROM pg_proc WHERE proname LIKE 'run_replay_%'"))->toBe(0);
+        ->and(DB::scalar("SELECT count(*) FROM pg_proc WHERE proname LIKE 'run_replay_%' AND pronamespace = current_schema()::regnamespace"))->toBe(0);
 
     Artisan::call('migrate', ['--force' => true]);
 

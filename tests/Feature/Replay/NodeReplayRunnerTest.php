@@ -114,7 +114,13 @@ it('gives the process no secret, no NODE_OPTIONS and nothing from the host', fun
         'UNRELATED_X' => 'host-noise',
     ];
 
+    // The host's own values are restored afterwards, never just unset: CI
+    // supplies the real DB_PASSWORD only through the environment, and every
+    // later test in this process needs it to connect.
+    $previous = [];
+
     foreach ($seeded as $name => $value) {
+        $previous[$name] = [getenv($name), $_ENV[$name] ?? null, $_SERVER[$name] ?? null];
         putenv("{$name}={$value}");
         $_ENV[$name] = $_SERVER[$name] = $value;
     }
@@ -122,9 +128,20 @@ it('gives the process no secret, no NODE_OPTIONS and nothing from the host', fun
     try {
         $result = (new NodeReplayRunner)->run(fixtureBundle('print-env.mjs'), []);
     } finally {
-        foreach (array_keys($seeded) as $name) {
-            putenv($name);
-            unset($_ENV[$name], $_SERVER[$name]);
+        foreach ($previous as $name => [$process, $env, $server]) {
+            putenv($process === false ? $name : "{$name}={$process}");
+
+            if ($env === null) {
+                unset($_ENV[$name]);
+            } else {
+                $_ENV[$name] = $env;
+            }
+
+            if ($server === null) {
+                unset($_SERVER[$name]);
+            } else {
+                $_SERVER[$name] = $server;
+            }
         }
     }
 
